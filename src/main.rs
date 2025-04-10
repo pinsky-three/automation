@@ -5,10 +5,12 @@ use async_openai::types::{
     ChatCompletionRequestMessageContentPartTextArgs, ChatCompletionRequestUserMessageArgs,
     CreateChatCompletionRequestArgs, ImageDetail, ImageUrlArgs,
 };
-use enigo::{Enigo, Keyboard, Mouse, Settings};
+use base64::Engine;
+use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use fs_extra::dir;
 use image::imageops::FilterType;
 use image::{GenericImageView, ImageFormat, ImageReader};
+use serde_json;
 use std::time::Instant;
 use std::{thread::sleep, time::Duration};
 use xcap::Monitor;
@@ -63,7 +65,7 @@ async fn main() {
     img.write_to(&mut cursor, ImageFormat::Png).unwrap();
 
     // Encode the image data to base64
-    let res_base64 = base64::encode(&buf);
+    let res_base64 = base64::engine::general_purpose::STANDARD.encode(&buf);
 
     println!("encode time: {:?}", start.elapsed());
 
@@ -71,13 +73,15 @@ async fn main() {
 
     let start = Instant::now();
 
+    let mut enigo = Enigo::new(&Settings::default()).unwrap();
+
     let request = CreateChatCompletionRequestArgs::default()
         .model("openai/gpt-4o-mini")
         .max_tokens(300_u32)
         .messages([ChatCompletionRequestUserMessageArgs::default()
             .content(vec![
                 ChatCompletionRequestMessageContentPartTextArgs::default()
-                    .text("What is this image?")
+                    .text("Based on this screenshot, what should be the next action? Respond with a JSON object containing the action type and parameters. Available actions are: mouse_move(x, y), mouse_click(button), key_press(key), text_input(text). Example: {\"action\": \"mouse_move\", \"x\": 100, \"y\": 200}")
                     .build()
                     .unwrap()
                     .into(),
@@ -103,38 +107,58 @@ async fn main() {
 
     let response = client.chat().create(request).await.unwrap();
 
+    let mut action_json = String::new();
     for choice in response.choices {
-        println!(
-            "{}: Role: {}  Content: {:?}",
-            choice.index,
-            choice.message.role,
-            choice.message.content.unwrap_or_default()
-        );
+        action_json = choice.message.content.unwrap_or_default();
+        println!("AI Response: {}", action_json);
     }
 
-    println!("response time: {:?}", start.elapsed());
+    // Clean up the JSON string by removing markdown formatting
+    let clean_json = action_json
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
 
-    // ---
-
-    let start = Instant::now();
-
-    let mut enigo = Enigo::new(&Settings::default()).unwrap();
-
-    // enigo.delay();
-
-    // enigo.move_mouse(500, 200, enigo::Coordinate::Abs).unwrap();
-    // enigo.button(Button::Left, enigo::Direction::Click).unwrap();
-    enigo
-        .key(enigo::Key::Meta, enigo::Direction::Click)
-        .unwrap();
-
-    // let (w, h) = enigo.main_display().unwrap();
-
-    // println!("w: {}, h: {}", w, h);
-
-    sleep(Duration::from_millis(100));
-
-    enigo.text("Hello World!").unwrap();
+    // Parse the JSON response and execute the action
+    if let Ok(action) = serde_json::from_str::<serde_json::Value>(&clean_json) {
+        match action["action"].as_str() {
+            Some("mouse_move") => {
+                if let (Some(x), Some(y)) = (action["x"].as_i64(), action["y"].as_i64()) {
+                    enigo
+                        .move_mouse(x as i32, y as i32, Coordinate::Abs)
+                        .unwrap();
+                }
+            }
+            Some("mouse_click") => {
+                if let Some(button) = action["button"].as_str() {
+                    match button {
+                        "left" => enigo.button(Button::Left, Direction::Click).unwrap(),
+                        "right" => enigo.button(Button::Right, Direction::Click).unwrap(),
+                        "middle" => enigo.button(Button::Middle, Direction::Click).unwrap(),
+                        _ => println!("Unknown button: {}", button),
+                    }
+                }
+            }
+            Some("key_press") => {
+                if let Some(key) = action["key"].as_str() {
+                    match key {
+                        "enter" => enigo.key(Key::Return, Direction::Click).unwrap(),
+                        "tab" => enigo.key(Key::Tab, Direction::Click).unwrap(),
+                        "escape" => enigo.key(Key::Escape, Direction::Click).unwrap(),
+                        _ => println!("Unknown key: {}", key),
+                    }
+                }
+            }
+            Some("text_input") => {
+                if let Some(text) = action["text"].as_str() {
+                    enigo.text(text).unwrap();
+                }
+            }
+            _ => println!("Unknown action: {:?}", action["action"]),
+        }
+    }
 
     println!("action time: {:?}", start.elapsed());
 }
