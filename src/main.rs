@@ -46,6 +46,8 @@ async fn main() {
 
     // ---
 
+    let start = Instant::now();
+
     let img = ImageReader::open(image_file_name.clone()).unwrap();
 
     let img = img.decode().unwrap();
@@ -63,7 +65,11 @@ async fn main() {
     // Encode the image data to base64
     let res_base64 = base64::encode(&buf);
 
+    println!("encode time: {:?}", start.elapsed());
+
     // ---
+
+    let start = Instant::now();
 
     let request = CreateChatCompletionRequestArgs::default()
         .model("openai/gpt-4o-mini")
@@ -106,7 +112,11 @@ async fn main() {
         );
     }
 
+    println!("response time: {:?}", start.elapsed());
+
     // ---
+
+    let start = Instant::now();
 
     let mut enigo = Enigo::new(&Settings::default()).unwrap();
 
@@ -118,13 +128,15 @@ async fn main() {
         .key(enigo::Key::Meta, enigo::Direction::Click)
         .unwrap();
 
-    let (w, h) = enigo.main_display().unwrap();
+    // let (w, h) = enigo.main_display().unwrap();
 
-    println!("w: {}, h: {}", w, h);
+    // println!("w: {}, h: {}", w, h);
 
     sleep(Duration::from_millis(100));
 
     enigo.text("Hello World!").unwrap();
+
+    println!("action time: {:?}", start.elapsed());
 }
 
 fn normalized(filename: String) -> String {
