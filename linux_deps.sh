@@ -1,0 +1,1 @@
+sudo apt install libxdo-dev libdbus-1-dev pkg-config 
