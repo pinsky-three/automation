@@ -6,16 +6,83 @@ use async_openai::types::{
     CreateChatCompletionRequestArgs, ImageDetail, ImageUrlArgs,
 };
 use base64::Engine;
+use chrono::Local;
 use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use fs_extra::dir;
 use image::imageops::FilterType;
 use image::{GenericImageView, ImageFormat, ImageReader};
+use std::fs;
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{thread::sleep, time::Duration};
 use xcap::Monitor;
+
+// Function to get the last N iterations
+fn get_last_n_iterations(n: usize) -> Vec<(String, String, String)> {
+    let iterations_dir = Path::new("target/iterations");
+    if !iterations_dir.exists() {
+        return Vec::new();
+    }
+
+    let mut iterations: Vec<(String, String, String)> = Vec::new();
+
+    // Get all iteration directories and sort them by name (timestamp) in descending order
+    let mut dirs: Vec<_> = fs::read_dir(iterations_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .collect();
+    dirs.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+
+    // Take the last N iterations
+    for entry in dirs.iter().take(n) {
+        let dir_path = entry.path();
+        let metadata_path = dir_path.join("metadata.json");
+        let analysis_path = dir_path.join("analysis.json");
+        let actions_path = dir_path.join("actions.json");
+
+        if metadata_path.exists() && analysis_path.exists() && actions_path.exists() {
+            if let (Ok(metadata), Ok(analysis), Ok(actions)) = (
+                fs::read_to_string(&metadata_path),
+                fs::read_to_string(&analysis_path),
+                fs::read_to_string(&actions_path),
+            ) {
+                iterations.push((metadata, analysis, actions));
+            }
+        }
+    }
+
+    iterations
+}
+
+// Function to format iterations history for the prompt
+fn format_iterations_history(iterations: &[(String, String, String)]) -> String {
+    if iterations.is_empty() {
+        return String::from("No previous iterations available.");
+    }
+
+    let mut history = String::from("Previous iterations:\n\n");
+
+    for (metadata, analysis, actions) in iterations {
+        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(metadata) {
+            if let (Some(timestamp), Some(instruction)) =
+                (meta["timestamp"].as_str(), meta["instruction"].as_str())
+            {
+                history.push_str(&format!("Iteration {}:\n", timestamp));
+                history.push_str(&format!("Instruction: {}\n", instruction));
+                history.push_str("Analysis:\n");
+                history.push_str(&format!("{}\n", analysis));
+                history.push_str("Actions:\n");
+                history.push_str(&format!("{}\n\n", actions));
+            }
+        }
+    }
+
+    history
+}
 
 #[tokio::main]
 async fn main() {
@@ -24,7 +91,7 @@ async fn main() {
     let api_base =
         std::env::var("API_BASE").unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
     let model_name =
-        std::env::var("MODEL_NAME").unwrap_or_else(|_| "google/gemini-flash-1.5-8b".to_string());
+        std::env::var("MODEL_NAME").unwrap_or_else(|_| "openai/gpt-4o-mini".to_string());
     let api_key = std::env::var("API_KEY").unwrap();
 
     let client = Client::with_config(
@@ -106,13 +173,17 @@ async fn main() {
         let start = Instant::now();
         let monitors = Monitor::all().unwrap();
 
+        // Create timestamp for this iteration
+        let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+        let iteration_dir = format!("target/iterations/{}", timestamp);
+        fs::create_dir_all(&iteration_dir).unwrap();
+
         dir::create_all("target/monitors", true).unwrap();
 
         let monitor = monitors.first().unwrap();
         let image = monitor.capture_image().unwrap();
 
-        let image_file_name = "target/monitors/monitor-1.png";
-
+        let image_file_name = format!("{}/screenshot.png", iteration_dir);
         image.save(&image_file_name).unwrap();
 
         println!("capture time: {:?}", start.elapsed());
@@ -121,14 +192,15 @@ async fn main() {
 
         let start = Instant::now();
 
-        let img = ImageReader::open(image_file_name).unwrap();
+        let img = ImageReader::open(&image_file_name).unwrap();
 
         let img = img.decode().unwrap();
 
         let (w, h) = img.dimensions();
         let img = img.resize(w / 3, h / 3, FilterType::CatmullRom);
 
-        img.save("target/monitors/monitor-1-resized.png").unwrap();
+        let resized_image_file_name = format!("{}/screenshot_resized.png", iteration_dir);
+        img.save(&resized_image_file_name).unwrap();
 
         // Create a buffer to store the image data
         let mut buf = Vec::new();
@@ -146,6 +218,10 @@ async fn main() {
 
         let instruction = current_instruction.lock().unwrap().clone();
 
+        // Get the last 3 iterations for context
+        let iterations_history = get_last_n_iterations(3);
+        let history_text = format_iterations_history(&iterations_history);
+
         // Stage 1: Analysis
         let analysis_request = CreateChatCompletionRequestArgs::default()
             .model(&model_name)
@@ -153,7 +229,9 @@ async fn main() {
             .messages([ChatCompletionRequestUserMessageArgs::default()
                 .content(vec![
                     ChatCompletionRequestMessageContentPartTextArgs::default()
-                        .text(format!("Analyze this screenshot and provide a STRICT JSON response. Your response must be a valid JSON object with EXACTLY these fields:
+                        .text(format!("{}
+
+Analyze this screenshot and provide a STRICT JSON response. Your response must be a valid JSON object with EXACTLY these fields:
 
 {{
     \"context\": string,           // Current application/window context
@@ -193,7 +271,7 @@ IMPORTANT:
 4. Use null for empty values
 5. Do not include any explanations or comments in the JSON
 6. Always include window_title and window_class for proper window management
-7. Set target_window to the window that needs to be focused for the task (e.g., \"Chrome\" for web tasks)", screen_width, screen_height))
+7. Set target_window to the window that needs to be focused for the task (e.g., \"Chrome\" for web tasks)", history_text, screen_width, screen_height))
                         .build()
                         .unwrap()
                         .into(),
@@ -230,6 +308,10 @@ IMPORTANT:
             .trim_end_matches("```")
             .trim();
 
+        // Save analysis JSON
+        let analysis_file_name = format!("{}/analysis.json", iteration_dir);
+        fs::write(&analysis_file_name, clean_analysis).unwrap();
+
         // Validate analysis JSON structure
         if let Err(e) = serde_json::from_str::<serde_json::Value>(clean_analysis) {
             println!("Error: Invalid analysis JSON format: {}", e);
@@ -243,7 +325,9 @@ IMPORTANT:
             .messages([ChatCompletionRequestUserMessageArgs::default()
                 .content(vec![
                     ChatCompletionRequestMessageContentPartTextArgs::default()
-                        .text(format!("Based on this context analysis and the instruction '{}', plan a sequence of actions. Your response must be a STRICT JSON array of actions.
+                        .text(format!("{}
+
+Based on this context analysis and the instruction '{}', plan a sequence of actions. Your response must be a STRICT JSON array of actions.
 
 Context Analysis:
 {}
@@ -291,7 +375,7 @@ Example valid response:
     {{ \"action\": \"text_input\", \"text\": \"google.com\" }},
     {{ \"action\": \"wait\", \"ms\": 200 }},
     {{ \"action\": \"key_press\", \"key\": \"return\" }}
-]", instruction, clean_analysis))
+]", history_text, instruction, clean_analysis))
                         .build()
                         .unwrap()
                         .into()])
@@ -315,6 +399,27 @@ Example valid response:
             .trim_start_matches("```")
             .trim_end_matches("```")
             .trim();
+
+        // Save action JSON
+        let action_file_name = format!("{}/actions.json", iteration_dir);
+        fs::write(&action_file_name, clean_action).unwrap();
+
+        // Save metadata
+        let metadata = serde_json::json!({
+            "timestamp": timestamp,
+            "instruction": instruction,
+            "model": model_name,
+            "screenshot": "screenshot.png",
+            "screenshot_resized": "screenshot_resized.png",
+            "analysis": "analysis.json",
+            "actions": "actions.json"
+        });
+        let metadata_file_name = format!("{}/metadata.json", iteration_dir);
+        fs::write(
+            &metadata_file_name,
+            serde_json::to_string_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
 
         // Validate action JSON structure
         if let Err(e) = serde_json::from_str::<Vec<serde_json::Value>>(clean_action) {
