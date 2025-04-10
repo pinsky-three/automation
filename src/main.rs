@@ -147,7 +147,39 @@ async fn main() {
             .messages([ChatCompletionRequestUserMessageArgs::default()
                 .content(vec![
                     ChatCompletionRequestMessageContentPartTextArgs::default()
-                        .text(format!("Based on this screenshot and the instruction '{}', what should be the next sequence of actions? The screen dimensions are {}x{} pixels. Respond with a JSON array of actions. Each action should be an object with 'action' and parameters. Available actions are: mouse_move(x, y), mouse_click(button), key_press(key), text_input(text), wait(ms), stop. Example: [{{\"action\": \"mouse_move\", \"x\": 100, \"y\": 200}}, {{\"action\": \"mouse_click\", \"button\": \"left\"}}, {{\"action\": \"wait\", \"ms\": 1000}}, {{\"action\": \"stop\"}}]", instruction, screen_width, screen_height))
+                        .text(format!("You are an automation assistant that controls a computer through basic actions. Your task is to execute the instruction '{}' by breaking it down into a sequence of basic actions.
+
+Screen Information:
+- Screen dimensions: {}x{} pixels
+- Coordinate system: (0,0) is at the top-left corner
+- High DPI display: Consider scaling factors when calculating coordinates
+
+Available Basic Actions (use ONLY these):
+1. mouse_move(x, y): Move mouse to absolute coordinates
+2. mouse_click(button): Click mouse button (left, right, middle)
+3. key_press(key): Press a single key (return, tab, escape)
+4. key_combination(keys): Press multiple keys simultaneously (e.g., ['control', 't'] for Ctrl+T)
+5. text_input(text): Type text
+6. wait(ms): Wait for milliseconds
+
+Guidelines for Reliable Automation:
+1. Always add small waits (100-500ms) between actions to ensure they complete
+2. For mouse movements, verify the target is visible in the screenshot
+3. For text input, ensure the target field is focused
+4. For key combinations, use the key_combination action instead of separate key_press actions
+5. Break complex tasks into small, reliable steps
+
+Example Task Breakdowns:
+1. Opening a new tab:
+[{{\"action\": \"key_combination\", \"keys\": [\"control\", \"t\"]}}, {{\"action\": \"wait\", \"ms\": 500}}, {{\"action\": \"text_input\", \"text\": \"google.com\"}}, {{\"action\": \"wait\", \"ms\": 200}}, {{\"action\": \"key_press\", \"key\": \"return\"}}]
+
+2. Typing a URL and pressing enter:
+[{{\"action\": \"text_input\", \"text\": \"google.com\"}}, {{\"action\": \"wait\", \"ms\": 200}}, {{\"action\": \"key_press\", \"key\": \"return\"}}]
+
+3. Clicking a button:
+[{{\"action\": \"mouse_move\", \"x\": 100, \"y\": 200}}, {{\"action\": \"wait\", \"ms\": 200}}, {{\"action\": \"mouse_click\", \"button\": \"left\"}}]
+
+Respond with a JSON array of these basic actions to accomplish the given instruction. Each action must be one of the six basic types listed above.", instruction, screen_width, screen_height))
                         .build()
                         .unwrap()
                         .into(),
@@ -214,11 +246,82 @@ async fn main() {
                     Some("key_press") => {
                         if let Some(key) = action["key"].as_str() {
                             println!("Pressing key: {}", key);
-                            match key {
-                                "enter" => enigo.key(Key::Return, Direction::Click).unwrap(),
+                            match key.to_lowercase().as_str() {
+                                "return" | "enter" => {
+                                    enigo.key(Key::Return, Direction::Click).unwrap()
+                                }
                                 "tab" => enigo.key(Key::Tab, Direction::Click).unwrap(),
                                 "escape" => enigo.key(Key::Escape, Direction::Click).unwrap(),
                                 _ => println!("Unknown key: {}", key),
+                            }
+                        }
+                    }
+                    Some("key_combination") => {
+                        if let Some(keys) = action["keys"].as_array() {
+                            let key_names: Vec<String> = keys
+                                .iter()
+                                .filter_map(|k| k.as_str())
+                                .map(|s| s.to_lowercase())
+                                .collect();
+                            println!("Pressing key combination: {:?}", key_names);
+
+                            // Press all modifier keys first
+                            for key in &key_names {
+                                match key.as_str() {
+                                    "control" | "ctrl" => {
+                                        enigo.key(Key::Control, Direction::Press).unwrap();
+                                    }
+                                    "alt" => {
+                                        enigo.key(Key::Alt, Direction::Press).unwrap();
+                                    }
+                                    "shift" => {
+                                        enigo.key(Key::Shift, Direction::Press).unwrap();
+                                    }
+                                    "meta" | "super" | "windows" => {
+                                        enigo.key(Key::Meta, Direction::Press).unwrap();
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            // Small delay to ensure modifier keys are registered
+                            sleep(Duration::from_millis(50));
+
+                            // Press the last key (non-modifier)
+                            if let Some(last_key) = key_names.last() {
+                                match last_key.as_str() {
+                                    "t" => enigo.text("t").unwrap(),
+                                    "w" => enigo.text("w").unwrap(),
+                                    "r" => enigo.text("r").unwrap(),
+                                    "l" => enigo.text("l").unwrap(),
+                                    "a" => enigo.text("a").unwrap(),
+                                    "c" => enigo.text("c").unwrap(),
+                                    "v" => enigo.text("v").unwrap(),
+                                    "x" => enigo.text("x").unwrap(),
+                                    "z" => enigo.text("z").unwrap(),
+                                    _ => println!("Unknown key in combination: {}", last_key),
+                                }
+                            }
+
+                            // Small delay to ensure the key combination is registered
+                            sleep(Duration::from_millis(50));
+
+                            for key in &key_names {
+                                match key.as_str() {
+                                    "control" | "ctrl" => {
+                                        enigo.key(Key::Control, Direction::Release).unwrap();
+                                    }
+                                    "alt" => {
+                                        enigo.key(Key::Alt, Direction::Release).unwrap();
+                                    }
+                                    "shift" => {
+                                        enigo.key(Key::Shift, Direction::Release).unwrap();
+                                    }
+                                    "meta" | "super" | "windows" => {
+                                        enigo.key(Key::Meta, Direction::Release).unwrap();
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                     }
@@ -233,11 +336,6 @@ async fn main() {
                             println!("Waiting for {}ms", ms);
                             sleep(Duration::from_millis(ms as u64));
                         }
-                    }
-                    Some("stop") => {
-                        println!("AI suggested stopping, but continuing with next iteration...");
-                        // Don't stop the loop, just continue to next iteration
-                        break;
                     }
                     _ => println!("Unknown action: {:?}", action["action"]),
                 }
