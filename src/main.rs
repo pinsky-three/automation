@@ -58,21 +58,90 @@ fn get_last_n_iterations(n: usize) -> Vec<(String, String, String)> {
     iterations
 }
 
+// Function to get screenshot from iteration directory
+fn get_screenshot_from_iteration(dir_path: &Path) -> Option<String> {
+    let screenshot_path = dir_path.join("screenshot_resized.png");
+    if screenshot_path.exists() {
+        if let Ok(img) = ImageReader::open(&screenshot_path) {
+            if let Ok(img) = img.decode() {
+                let (w, h) = img.dimensions();
+                let img = img.resize(w / 3, h / 3, FilterType::CatmullRom);
+
+                // Create a buffer to store the image data
+                let mut buf = Vec::new();
+                let mut cursor = std::io::Cursor::new(&mut buf);
+                if img.write_to(&mut cursor, ImageFormat::Png).is_ok() {
+                    // Encode the image data to base64
+                    return Some(base64::engine::general_purpose::STANDARD.encode(&buf));
+                }
+            }
+        }
+    }
+    None
+}
+
+// Function to get the last N iterations with screenshots
+fn get_last_n_iterations_with_screenshots(
+    n: usize,
+) -> Vec<(String, String, String, Option<String>)> {
+    let iterations_dir = Path::new("target/iterations");
+    if !iterations_dir.exists() {
+        return Vec::new();
+    }
+
+    let mut iterations: Vec<(String, String, String, Option<String>)> = Vec::new();
+
+    // Get all iteration directories and sort them by name (timestamp) in descending order
+    let mut dirs: Vec<_> = fs::read_dir(iterations_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .collect();
+    dirs.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+
+    // Take the last N iterations
+    for entry in dirs.iter().take(n) {
+        let dir_path = entry.path();
+        let metadata_path = dir_path.join("metadata.json");
+        let analysis_path = dir_path.join("analysis.json");
+        let actions_path = dir_path.join("actions.json");
+
+        if metadata_path.exists() && analysis_path.exists() && actions_path.exists() {
+            if let (Ok(metadata), Ok(analysis), Ok(actions)) = (
+                fs::read_to_string(&metadata_path),
+                fs::read_to_string(&analysis_path),
+                fs::read_to_string(&actions_path),
+            ) {
+                let screenshot = get_screenshot_from_iteration(&dir_path);
+                iterations.push((metadata, analysis, actions, screenshot));
+            }
+        }
+    }
+
+    iterations
+}
+
 // Function to format iterations history for the prompt
-fn format_iterations_history(iterations: &[(String, String, String)]) -> String {
+fn format_iterations_history(iterations: &[(String, String, String, Option<String>)]) -> String {
     if iterations.is_empty() {
         return String::from("No previous iterations available.");
     }
 
     let mut history = String::from("Previous iterations:\n\n");
 
-    for (metadata, analysis, actions) in iterations {
+    for (metadata, analysis, actions, _) in iterations {
         if let Ok(meta) = serde_json::from_str::<serde_json::Value>(metadata) {
-            if let (Some(timestamp), Some(instruction)) =
-                (meta["timestamp"].as_str(), meta["instruction"].as_str())
-            {
+            if let (Some(timestamp), Some(instruction), Some(status)) = (
+                meta["timestamp"].as_str(),
+                meta["instruction"].as_str(),
+                meta["status"].as_str(),
+            ) {
                 history.push_str(&format!("Iteration {}:\n", timestamp));
                 history.push_str(&format!("Instruction: {}\n", instruction));
+                history.push_str(&format!("Status: {}\n", status));
+                if let Some(feedback) = meta["feedback"].as_str() {
+                    history.push_str(&format!("Feedback: {}\n", feedback));
+                }
                 history.push_str("Analysis:\n");
                 history.push_str(&format!("{}\n", analysis));
                 history.push_str("Actions:\n");
@@ -84,6 +153,99 @@ fn format_iterations_history(iterations: &[(String, String, String)]) -> String 
     history
 }
 
+// Function to determine if a task is complete based on the analysis
+fn is_task_complete(analysis: &str, instruction: &str) -> (bool, String) {
+    // Parse the analysis JSON
+    let analysis_json = match serde_json::from_str::<serde_json::Value>(analysis) {
+        Ok(json) => json,
+        Err(_) => return (false, "Failed to parse analysis".to_string()),
+    };
+
+    // Check for completion indicators in the analysis
+    let context = analysis_json["context"].as_str().unwrap_or("");
+
+    // Get challenges array, creating an empty Vec if not present
+    let empty_vec = Vec::new();
+    let challenges = analysis_json["challenges"].as_array().unwrap_or(&empty_vec);
+
+    // If there are no challenges and the context matches the instruction's goal
+    if challenges.is_empty() && context.contains(instruction) {
+        return (true, "Task completed successfully".to_string());
+    }
+
+    // If there are challenges, provide feedback
+    if !challenges.is_empty() {
+        let feedback: String = challenges
+            .iter()
+            .filter_map(|c| c.as_str())
+            .collect::<Vec<&str>>()
+            .join(", ");
+        return (false, format!("Challenges encountered: {}", feedback));
+    }
+
+    (false, "Task in progress".to_string())
+}
+
+// Function to generate self-instruction based on history
+async fn generate_self_instruction(
+    client: &Client<OpenAIConfig>,
+    model_name: &str,
+    history: &[(String, String, String, Option<String>)],
+    current_instruction: &str,
+) -> String {
+    if history.is_empty() {
+        return current_instruction.to_string();
+    }
+
+    let history_text = format_iterations_history(history);
+    let last_iteration = &history[0];
+    let (_, feedback) = is_task_complete(&last_iteration.1, current_instruction);
+
+    let self_instruction_request = CreateChatCompletionRequestArgs::default()
+        .model(model_name)
+        .max_tokens(256_u32)
+        .messages([ChatCompletionRequestUserMessageArgs::default()
+            .content(vec![
+                ChatCompletionRequestMessageContentPartTextArgs::default()
+                    .text(format!(
+                        "Based on the following history and feedback, generate a refined instruction to achieve the original goal: '{}'
+
+History:
+{}
+
+Feedback from last attempt: {}
+
+Generate a new instruction that:
+1. Addresses the feedback from previous attempts
+2. Maintains the original goal
+3. Is clear and specific
+4. Focuses on overcoming identified challenges
+
+Response should be ONLY the new instruction, no additional text.",
+                        current_instruction, history_text, feedback
+                    ))
+                    .build()
+                    .unwrap()
+                    .into()])
+            .build()
+            .unwrap()
+            .into()])
+        .build()
+        .unwrap();
+
+    let response = client
+        .chat()
+        .create(self_instruction_request)
+        .await
+        .unwrap();
+    let mut new_instruction = String::new();
+    for choice in response.choices {
+        new_instruction = choice.message.content.unwrap_or_default();
+    }
+
+    new_instruction.trim().to_string()
+}
+
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
@@ -91,7 +253,12 @@ async fn main() {
     let api_base =
         std::env::var("API_BASE").unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
     let model_name =
-        std::env::var("MODEL_NAME").unwrap_or_else(|_| "openai/gpt-4o-mini".to_string());
+        std::env::var("MODEL_NAME").unwrap_or_else(|_| "google/gemini-2.0-flash-001".to_string());
+    let max_tokens = std::env::var("MAX_TOKENS")
+        .unwrap_or_else(|_| "512".to_string())
+        .parse::<u32>()
+        .unwrap_or(512);
+
     let api_key = std::env::var("API_KEY").unwrap();
 
     let client = Client::with_config(
@@ -218,20 +385,27 @@ async fn main() {
 
         let instruction = current_instruction.lock().unwrap().clone();
 
-        // Get the last 3 iterations for context
-        let iterations_history = get_last_n_iterations(3);
+        // Get the last 3 iterations with screenshots for context
+        let iterations_history = get_last_n_iterations_with_screenshots(3);
         let history_text = format_iterations_history(&iterations_history);
 
-        // Stage 1: Analysis
-        let analysis_request = CreateChatCompletionRequestArgs::default()
-            .model(&model_name)
-            .max_tokens(512_u32)
-            .messages([ChatCompletionRequestUserMessageArgs::default()
-                .content(vec![
-                    ChatCompletionRequestMessageContentPartTextArgs::default()
-                        .text(format!("{}
+        // Prepare content array with current and historical screenshots
+        let mut content_parts = vec![
+            ChatCompletionRequestMessageContentPartTextArgs::default()
+                .text(format!("{history}
 
-Analyze this screenshot and provide a STRICT JSON response. Your response must be a valid JSON object with EXACTLY these fields:
+CURRENT STATE ANALYSIS:
+You are analyzing the current state of the screen. Below is the history of previous attempts for context.
+
+HISTORY OF PREVIOUS ATTEMPTS:
+{history}
+
+CURRENT SCREEN INFORMATION:
+- Screen dimensions: {width}x{height} pixels
+- Coordinate system: (0,0) is at the top-left corner
+- High DPI display: Consider scaling factors when calculating coordinates
+
+Analyze the CURRENT screenshot and provide a STRICT JSON response. Your response must be a valid JSON object with EXACTLY these fields:
 
 {{
     \"context\": string,           // Current application/window context
@@ -259,11 +433,6 @@ Analyze this screenshot and provide a STRICT JSON response. Your response must b
     ]
 }}
 
-Screen Information:
-- Screen dimensions: {}x{} pixels
-- Coordinate system: (0,0) is at the top-left corner
-- High DPI display: Consider scaling factors when calculating coordinates
-
 IMPORTANT:
 1. Response must be ONLY the JSON object, no additional text
 2. All coordinates must be within screen bounds
@@ -271,14 +440,39 @@ IMPORTANT:
 4. Use null for empty values
 5. Do not include any explanations or comments in the JSON
 6. Always include window_title and window_class for proper window management
-7. Set target_window to the window that needs to be focused for the task (e.g., \"Chrome\" for web tasks)", history_text, screen_width, screen_height))
+7. Set target_window to the window that needs to be focused for the task (e.g., \"Chrome\" for web tasks)
+8. ONLY analyze the CURRENT screenshot, not the historical ones",
+                    history = history_text,
+                    width = screen_width,
+                    height = screen_height))
+                .build()
+                .unwrap()
+                .into()
+        ];
+
+        // Add current screenshot first
+        content_parts.push(
+            ChatCompletionRequestMessageContentPartImageArgs::default()
+                .image_url(
+                    ImageUrlArgs::default()
+                        .url(format!("data:image/png;base64,{}", res_base64))
+                        .detail(ImageDetail::High)
                         .build()
-                        .unwrap()
-                        .into(),
+                        .unwrap(),
+                )
+                .build()
+                .unwrap()
+                .into(),
+        );
+
+        // Add historical screenshots in reverse chronological order (oldest first)
+        for (_, _, _, screenshot) in iterations_history.iter().rev() {
+            if let Some(base64_img) = screenshot {
+                content_parts.push(
                     ChatCompletionRequestMessageContentPartImageArgs::default()
                         .image_url(
                             ImageUrlArgs::default()
-                                .url(format!("data:image/png;base64,{}", res_base64))
+                                .url(format!("data:image/png;base64,{}", base64_img))
                                 .detail(ImageDetail::High)
                                 .build()
                                 .unwrap(),
@@ -286,7 +480,16 @@ IMPORTANT:
                         .build()
                         .unwrap()
                         .into(),
-                ])
+                );
+            }
+        }
+
+        // Stage 1: Analysis
+        let analysis_request = CreateChatCompletionRequestArgs::default()
+            .model(&model_name)
+            .max_tokens(max_tokens)
+            .messages([ChatCompletionRequestUserMessageArgs::default()
+                .content(content_parts)
                 .build()
                 .unwrap()
                 .into()])
@@ -321,7 +524,7 @@ IMPORTANT:
         // Stage 2: Action Planning
         let action_request = CreateChatCompletionRequestArgs::default()
             .model(&model_name)
-            .max_tokens(512_u32)
+            .max_tokens(max_tokens)
             .messages([ChatCompletionRequestUserMessageArgs::default()
                 .content(vec![
                     ChatCompletionRequestMessageContentPartTextArgs::default()
@@ -404,7 +607,14 @@ Example valid response:
         let action_file_name = format!("{}/actions.json", iteration_dir);
         fs::write(&action_file_name, clean_action).unwrap();
 
-        // Save metadata
+        // Save metadata with enhanced information
+        let (is_complete, feedback) = is_task_complete(&clean_analysis, &instruction);
+        let status = if is_complete {
+            "completed"
+        } else {
+            "in_progress"
+        };
+
         let metadata = serde_json::json!({
             "timestamp": timestamp,
             "instruction": instruction,
@@ -412,7 +622,9 @@ Example valid response:
             "screenshot": "screenshot.png",
             "screenshot_resized": "screenshot_resized.png",
             "analysis": "analysis.json",
-            "actions": "actions.json"
+            "actions": "actions.json",
+            "status": status,
+            "feedback": feedback
         });
         let metadata_file_name = format!("{}/metadata.json", iteration_dir);
         fs::write(
@@ -420,6 +632,15 @@ Example valid response:
             serde_json::to_string_pretty(&metadata).unwrap(),
         )
         .unwrap();
+
+        // Generate self-instruction for next iteration if task is not complete
+        if !is_complete {
+            let new_instruction =
+                generate_self_instruction(&client, &model_name, &iterations_history, &instruction)
+                    .await;
+            println!("Generated new instruction: {}", new_instruction);
+            *current_instruction.lock().unwrap() = new_instruction;
+        }
 
         // Validate action JSON structure
         if let Err(e) = serde_json::from_str::<Vec<serde_json::Value>>(clean_action) {
