@@ -1,12 +1,11 @@
 use async_openai::Client;
-use async_openai::config::{Config, OpenAIConfig};
+use async_openai::config::OpenAIConfig;
 use async_openai::types::{
     ChatCompletionRequestMessageContentPartImageArgs,
     ChatCompletionRequestMessageContentPartTextArgs, ChatCompletionRequestUserMessageArgs,
     CreateChatCompletionRequestArgs, ImageDetail, ImageUrlArgs,
 };
-use base64::Engine;
-use enigo::{Button, Enigo, Keyboard, Mouse, Settings};
+use enigo::{Enigo, Keyboard, Mouse, Settings};
 use fs_extra::dir;
 use image::imageops::FilterType;
 use image::{GenericImageView, ImageFormat, ImageReader};
@@ -16,12 +15,14 @@ use xcap::Monitor;
 
 #[tokio::main]
 async fn main() {
-    println!("Hello, world!");
+    dotenvy::dotenv().ok();
+
+    let api_key = std::env::var("API_KEY").unwrap();
 
     let client = Client::with_config(
         OpenAIConfig::new()
             .with_api_base("https://openrouter.ai/api/v1")
-            .with_api_key(""),
+            .with_api_key(api_key),
     );
 
     // let image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg";
@@ -50,7 +51,7 @@ async fn main() {
     let img = img.decode().unwrap();
 
     let (w, h) = img.dimensions();
-    let img = img.resize(w / 3, h / 3, FilterType::CatmullRom);
+    let img = img.resize(w / 4, h / 4, FilterType::CatmullRom);
 
     img.save("target/monitors/monitor-1-resized.png").unwrap();
 
