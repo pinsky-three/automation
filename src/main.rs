@@ -10,9 +10,9 @@ use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings
 use fs_extra::dir;
 use image::imageops::FilterType;
 use image::{GenericImageView, ImageFormat, ImageReader};
-use serde_json;
+// use serde_json;
 use std::time::Instant;
-use std::{thread::sleep, time::Duration};
+// use std::{thread::sleep, time::Duration};
 use xcap::Monitor;
 
 #[tokio::main]
@@ -37,10 +37,7 @@ async fn main() {
     let monitor = monitors.first().unwrap();
     let image = monitor.capture_image().unwrap();
 
-    let image_file_name = format!(
-        "target/monitors/monitor-{}.png",
-        normalized(monitor.name().unwrap())
-    );
+    let image_file_name = "target/monitors/monitor-1.png";
 
     image.save(&image_file_name).unwrap();
 
@@ -50,7 +47,7 @@ async fn main() {
 
     let start = Instant::now();
 
-    let img = ImageReader::open(image_file_name.clone()).unwrap();
+    let img = ImageReader::open(image_file_name).unwrap();
 
     let img = img.decode().unwrap();
 
