@@ -21,11 +21,15 @@ use xcap::Monitor;
 async fn main() {
     dotenvy::dotenv().ok();
 
+    let api_base =
+        std::env::var("API_BASE").unwrap_or_else(|_| "https://openrouter.ai/api/v1".to_string());
+    let model_name =
+        std::env::var("MODEL_NAME").unwrap_or_else(|_| "google/gemini-flash-1.5-8b".to_string());
     let api_key = std::env::var("API_KEY").unwrap();
 
     let client = Client::with_config(
         OpenAIConfig::new()
-            .with_api_base("https://openrouter.ai/api/v1")
+            .with_api_base(api_base)
             .with_api_key(api_key),
     );
 
@@ -141,45 +145,41 @@ async fn main() {
         let start = Instant::now();
 
         let instruction = current_instruction.lock().unwrap().clone();
-        let request = CreateChatCompletionRequestArgs::default()
-            .model("openai/gpt-4o-mini")
+
+        // Stage 1: Analysis
+        let analysis_request = CreateChatCompletionRequestArgs::default()
+            .model(&model_name)
             .max_tokens(300_u32)
             .messages([ChatCompletionRequestUserMessageArgs::default()
                 .content(vec![
                     ChatCompletionRequestMessageContentPartTextArgs::default()
-                        .text(format!("You are an automation assistant that controls a computer through basic actions. Your task is to execute the instruction '{}' by breaking it down into a sequence of basic actions.
+                        .text(format!("Analyze this screenshot and provide a detailed context analysis. Consider:
+1. Current context (e.g., browser window, text editor, desktop)
+2. Visible UI elements (buttons, text fields, menus) with their coordinates
+3. Current state (e.g., text selected, window focused)
+4. Any potential obstacles or challenges
 
 Screen Information:
 - Screen dimensions: {}x{} pixels
 - Coordinate system: (0,0) is at the top-left corner
 - High DPI display: Consider scaling factors when calculating coordinates
 
-Available Basic Actions (use ONLY these):
-1. mouse_move(x, y): Move mouse to absolute coordinates
-2. mouse_click(button): Click mouse button (left, right, middle)
-3. key_press(key): Press a single key (return, tab, escape)
-4. key_combination(keys): Press multiple keys simultaneously (e.g., ['control', 't'] for Ctrl+T)
-5. text_input(text): Type text
-6. wait(ms): Wait for milliseconds
-
-Guidelines for Reliable Automation:
-1. Always add small waits (100-500ms) between actions to ensure they complete
-2. For mouse movements, verify the target is visible in the screenshot
-3. For text input, ensure the target field is focused
-4. For key combinations, use the key_combination action instead of separate key_press actions
-5. Break complex tasks into small, reliable steps
-
-Example Task Breakdowns:
-1. Opening a new tab:
-[{{\"action\": \"key_combination\", \"keys\": [\"control\", \"t\"]}}, {{\"action\": \"wait\", \"ms\": 500}}, {{\"action\": \"text_input\", \"text\": \"google.com\"}}, {{\"action\": \"wait\", \"ms\": 200}}, {{\"action\": \"key_press\", \"key\": \"return\"}}]
-
-2. Typing a URL and pressing enter:
-[{{\"action\": \"text_input\", \"text\": \"google.com\"}}, {{\"action\": \"wait\", \"ms\": 200}}, {{\"action\": \"key_press\", \"key\": \"return\"}}]
-
-3. Clicking a button:
-[{{\"action\": \"mouse_move\", \"x\": 100, \"y\": 200}}, {{\"action\": \"wait\", \"ms\": 200}}, {{\"action\": \"mouse_click\", \"button\": \"left\"}}]
-
-Respond with a JSON array of these basic actions to accomplish the given instruction. Each action must be one of the six basic types listed above.", instruction, screen_width, screen_height))
+Respond with a JSON object containing your analysis. Example format:
+{{
+    \"context\": \"Chrome browser window with google.com tab\",
+    \"ui_elements\": [
+        {{ \"type\": \"address_bar\", \"coords\": [100, 50, 500, 80] }},
+        {{ \"type\": \"new_tab_button\", \"coords\": [800, 10, 830, 40] }}
+    ],
+    \"state\": {{
+        \"focused_element\": \"address_bar\",
+        \"selected_text\": null,
+        \"active_window\": \"chrome\"
+    }},
+    \"challenges\": [
+        \"Need to ensure Chrome window is focused before actions\"
+    ]
+}}", screen_width, screen_height))
                         .build()
                         .unwrap()
                         .into(),
@@ -201,24 +201,83 @@ Respond with a JSON array of these basic actions to accomplish the given instruc
             .build()
             .unwrap();
 
-        let response = client.chat().create(request).await.unwrap();
-
-        let mut action_json = String::new();
-        for choice in response.choices {
-            action_json = choice.message.content.unwrap_or_default();
-            println!("AI Response: {}", action_json);
+        let analysis_response = client.chat().create(analysis_request).await.unwrap();
+        let mut analysis_json = String::new();
+        for choice in analysis_response.choices {
+            analysis_json = choice.message.content.unwrap_or_default();
+            println!("Analysis Response: {}", analysis_json);
         }
 
-        // Clean up the JSON string by removing markdown formatting
-        let clean_json = action_json
+        // Clean up the analysis JSON
+        let clean_analysis = analysis_json
             .trim()
             .trim_start_matches("```json")
             .trim_start_matches("```")
             .trim_end_matches("```")
             .trim();
 
-        // Parse the JSON response and execute the actions
-        if let Ok(actions) = serde_json::from_str::<Vec<serde_json::Value>>(clean_json) {
+        // Stage 2: Action Planning
+        let action_request = CreateChatCompletionRequestArgs::default()
+            .model(&model_name)
+            .max_tokens(300_u32)
+            .messages([ChatCompletionRequestUserMessageArgs::default()
+                .content(vec![
+                    ChatCompletionRequestMessageContentPartTextArgs::default()
+                        .text(format!("Based on this context analysis and the instruction '{}', plan a sequence of actions to accomplish the task.
+
+Context Analysis:
+{}
+
+Available Basic Actions (use ONLY these):
+1. mouse_move(x, y): Move mouse to absolute coordinates
+2. mouse_click(button): Click mouse button (left, right, middle)
+3. key_press(key): Press a single key (return, tab, escape)
+4. key_combination(keys): Press multiple keys simultaneously (e.g., ['control', 't'] for Ctrl+T)
+5. text_input(text): Type text
+6. wait(ms): Wait for milliseconds
+
+Guidelines for Reliable Automation:
+1. Always add small waits (100-500ms) between actions to ensure they complete
+2. For mouse movements, verify the target is visible in the screenshot
+3. For text input, ensure the target field is focused
+4. For key combinations, use the key_combination action instead of separate key_press actions
+5. Break complex tasks into small, reliable steps
+6. Consider the current context and state when planning actions
+
+Respond with a JSON array of actions to accomplish the instruction. Example:
+[
+    {{\"action\": \"key_combination\", \"keys\": [\"control\", \"t\"]}},
+    {{\"action\": \"wait\", \"ms\": 500}},
+    {{\"action\": \"text_input\", \"text\": \"google.com\"}},
+    {{\"action\": \"wait\", \"ms\": 200}},
+    {{\"action\": \"key_press\", \"key\": \"return\"}}
+]", instruction, clean_analysis))
+                        .build()
+                        .unwrap()
+                        .into()])
+                .build()
+                .unwrap()
+                .into()])
+            .build()
+            .unwrap();
+
+        let action_response = client.chat().create(action_request).await.unwrap();
+        let mut action_json = String::new();
+        for choice in action_response.choices {
+            action_json = choice.message.content.unwrap_or_default();
+            println!("Action Plan: {}", action_json);
+        }
+
+        // Clean up the action JSON
+        let clean_action = action_json
+            .trim()
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+
+        // Parse and execute the actions
+        if let Ok(actions) = serde_json::from_str::<Vec<serde_json::Value>>(clean_action) {
             for action in actions {
                 if !*should_continue.lock().unwrap() {
                     break;
