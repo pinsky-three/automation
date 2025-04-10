@@ -121,6 +121,7 @@ dependencies = [
  "enigo",
  "fs_extra",
  "image 0.25.6",
+ "serde",
  "serde_json",
  "tokio",
  "xcap",

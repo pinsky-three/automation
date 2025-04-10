@@ -11,6 +11,8 @@ use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings
 use fs_extra::dir;
 use image::imageops::FilterType;
 use image::{GenericImageView, ImageFormat, ImageReader};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -19,6 +21,160 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{thread::sleep, time::Duration};
 use xcap::Monitor;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct TaskState {
+    status: String,                  // "in_progress", "completed", "paused", "failed"
+    attempts: u32,                   // Number of attempts made
+    last_action: String,             // Last action taken
+    success_criteria: Vec<String>,   // Criteria for task completion
+    memory: HashMap<String, String>, // Persistent memory across iterations
+    feedback: Vec<String>,           // Feedback from previous attempts
+    start_time: i64,                 // Unix timestamp when task started
+    last_update: i64,                // Unix timestamp of last update
+}
+
+impl TaskState {
+    fn new() -> Self {
+        TaskState {
+            status: "in_progress".to_string(),
+            attempts: 0,
+            last_action: String::new(),
+            success_criteria: vec![
+                "Task completed".to_string(),
+                "Information found".to_string(),
+                "Research complete".to_string(),
+            ],
+            memory: HashMap::new(),
+            feedback: Vec::new(),
+            start_time: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+            last_update: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64,
+        }
+    }
+
+    fn update(&mut self, analysis: &str, actions: &str) {
+        self.attempts += 1;
+        self.last_update = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Parse the last action from actions JSON
+        if let Ok(actions_json) = serde_json::from_str::<Vec<serde_json::Value>>(actions) {
+            if let Some(last_action) = actions_json.last() {
+                if let Some(action_type) = last_action["action"].as_str() {
+                    self.last_action = action_type.to_string();
+                }
+            }
+        }
+
+        // Update memory based on analysis
+        if let Ok(analysis_json) = serde_json::from_str::<serde_json::Value>(analysis) {
+            if let Some(context) = analysis_json["context"].as_str() {
+                self.memory
+                    .insert("last_context".to_string(), context.to_string());
+            }
+            if let Some(state) = analysis_json["state"].as_object() {
+                if let Some(window_title) = state["window_title"].as_str() {
+                    self.memory
+                        .insert("last_window".to_string(), window_title.to_string());
+                }
+            }
+            // Add feedback from challenges
+            if let Some(challenges) = analysis_json["challenges"].as_array() {
+                for challenge in challenges {
+                    if let Some(challenge_str) = challenge.as_str() {
+                        self.feedback.push(challenge_str.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    fn should_pause(&self) -> bool {
+        // Pause if too many attempts
+        if self.attempts > 10 {
+            return true;
+        }
+
+        // Pause if stuck in a loop (same action repeated)
+        if self.attempts > 3 {
+            let last_actions: Vec<String> = self
+                .feedback
+                .iter()
+                .rev()
+                .take(3)
+                .filter_map(|f| f.split(":").next().map(|s| s.to_string()))
+                .collect();
+
+            if last_actions.len() == 3
+                && last_actions[0] == last_actions[1]
+                && last_actions[1] == last_actions[2]
+            {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn is_complete(&self, analysis: &str) -> bool {
+        // Don't complete if we haven't taken any actions yet
+        if self.attempts < 2 {
+            return false;
+        }
+
+        // Check if all success criteria are met
+        for criterion in &self.success_criteria {
+            if !analysis.contains(criterion) {
+                return false;
+            }
+        }
+
+        // Check if there are no challenges
+        if let Ok(analysis_json) = serde_json::from_str::<serde_json::Value>(analysis) {
+            if let Some(challenges) = analysis_json["challenges"].as_array() {
+                if !challenges.is_empty() {
+                    return false;
+                }
+            }
+        }
+
+        // Check if we have performed meaningful actions
+        if self.last_action.is_empty() {
+            return false;
+        }
+
+        true
+    }
+}
+
+// Function to load or create task state
+fn load_task_state(iteration_dir: &str) -> TaskState {
+    let state_path = Path::new(iteration_dir).join("task_state.json");
+    if state_path.exists() {
+        if let Ok(state_json) = fs::read_to_string(&state_path) {
+            if let Ok(state) = serde_json::from_str::<TaskState>(&state_json) {
+                return state;
+            }
+        }
+    }
+    TaskState::new()
+}
+
+// Function to save task state
+fn save_task_state(iteration_dir: &str, state: &TaskState) {
+    let state_path = Path::new(iteration_dir).join("task_state.json");
+    if let Ok(state_json) = serde_json::to_string_pretty(state) {
+        let _ = fs::write(&state_path, state_json);
+    }
+}
 
 // Function to get the last N iterations
 fn get_last_n_iterations(n: usize) -> Vec<(String, String, String)> {
@@ -153,45 +309,13 @@ fn format_iterations_history(iterations: &[(String, String, String, Option<Strin
     history
 }
 
-// Function to determine if a task is complete based on the analysis
-fn is_task_complete(analysis: &str, instruction: &str) -> (bool, String) {
-    // Parse the analysis JSON
-    let analysis_json = match serde_json::from_str::<serde_json::Value>(analysis) {
-        Ok(json) => json,
-        Err(_) => return (false, "Failed to parse analysis".to_string()),
-    };
-
-    // Check for completion indicators in the analysis
-    let context = analysis_json["context"].as_str().unwrap_or("");
-
-    // Get challenges array, creating an empty Vec if not present
-    let empty_vec = Vec::new();
-    let challenges = analysis_json["challenges"].as_array().unwrap_or(&empty_vec);
-
-    // If there are no challenges and the context matches the instruction's goal
-    if challenges.is_empty() && context.contains(instruction) {
-        return (true, "Task completed successfully".to_string());
-    }
-
-    // If there are challenges, provide feedback
-    if !challenges.is_empty() {
-        let feedback: String = challenges
-            .iter()
-            .filter_map(|c| c.as_str())
-            .collect::<Vec<&str>>()
-            .join(", ");
-        return (false, format!("Challenges encountered: {}", feedback));
-    }
-
-    (false, "Task in progress".to_string())
-}
-
 // Function to generate self-instruction based on history
 async fn generate_self_instruction(
     client: &Client<OpenAIConfig>,
     model_name: &str,
     history: &[(String, String, String, Option<String>)],
     current_instruction: &str,
+    task_state: &TaskState,
 ) -> String {
     if history.is_empty() {
         return current_instruction.to_string();
@@ -199,7 +323,15 @@ async fn generate_self_instruction(
 
     let history_text = format_iterations_history(history);
     let last_iteration = &history[0];
-    let (_, feedback) = is_task_complete(&last_iteration.1, current_instruction);
+
+    // Use task state for feedback instead of is_task_complete
+    let feedback = if task_state.status == "completed" {
+        "Task completed successfully".to_string()
+    } else if !task_state.feedback.is_empty() {
+        task_state.feedback.last().unwrap().clone()
+    } else {
+        "Task in progress".to_string()
+    };
 
     let self_instruction_request = CreateChatCompletionRequestArgs::default()
         .model(model_name)
@@ -215,6 +347,12 @@ History:
 
 Feedback from last attempt: {}
 
+Current Task State:
+- Status: {}
+- Attempts: {}
+- Last Action: {}
+- Memory: {:?}
+
 Generate a new instruction that:
 1. Addresses the feedback from previous attempts
 2. Maintains the original goal
@@ -222,7 +360,11 @@ Generate a new instruction that:
 4. Focuses on overcoming identified challenges
 
 Response should be ONLY the new instruction, no additional text.",
-                        current_instruction, history_text, feedback
+                        current_instruction, history_text, feedback,
+                        task_state.status,
+                        task_state.attempts,
+                        task_state.last_action,
+                        task_state.memory
                     ))
                     .build()
                     .unwrap()
@@ -389,10 +531,54 @@ async fn main() {
         let iterations_history = get_last_n_iterations_with_screenshots(3);
         let history_text = format_iterations_history(&iterations_history);
 
-        // Prepare content array with current and historical screenshots
-        let mut content_parts = vec![
+        // Load or create task state
+        let mut task_state = load_task_state(&iteration_dir);
+
+        // Update task state with current iteration
+        task_state.update(&history_text, &history_text);
+
+        // Check if we should pause
+        if task_state.should_pause() {
+            println!("Task paused due to too many attempts or detected loop");
+            task_state.status = "paused".to_string();
+            save_task_state(&iteration_dir, &task_state);
+            sleep(Duration::from_secs(5));
+            continue;
+        }
+
+        // Check if task is complete
+        if task_state.is_complete(&history_text) {
+            println!(
+                "Task completed successfully after {} attempts!",
+                task_state.attempts
+            );
+            task_state.status = "completed".to_string();
+            save_task_state(&iteration_dir, &task_state);
+            break;
+        }
+
+        // Save updated task state
+        save_task_state(&iteration_dir, &task_state);
+
+        // Add task state to the prompt
+        let state_context = format!(
+            "\nTASK STATE:
+- Status: {}
+- Attempts: {}
+- Last Action: {}
+- Memory: {:?}
+- Feedback: {:?}",
+            task_state.status,
+            task_state.attempts,
+            task_state.last_action,
+            task_state.memory,
+            task_state.feedback
+        );
+
+        // Create new content parts with task state
+        let mut new_content_parts = vec![
             ChatCompletionRequestMessageContentPartTextArgs::default()
-                .text(format!("{history}
+                .text(format!("{}{}
 
 CURRENT STATE ANALYSIS:
 You are analyzing the current state of the screen. Below is the history of previous attempts for context.
@@ -441,7 +627,9 @@ IMPORTANT:
 5. Do not include any explanations or comments in the JSON
 6. Always include window_title and window_class for proper window management
 7. Set target_window to the window that needs to be focused for the task (e.g., \"Chrome\" for web tasks)
-8. ONLY analyze the CURRENT screenshot, not the historical ones",
+8. ONLY analyze the CURRENT screenshot, not the historical ones", 
+                    history_text,
+                    state_context,
                     history = history_text,
                     width = screen_width,
                     height = screen_height))
@@ -450,8 +638,8 @@ IMPORTANT:
                 .into()
         ];
 
-        // Add current screenshot first
-        content_parts.push(
+        // Add current screenshot
+        new_content_parts.push(
             ChatCompletionRequestMessageContentPartImageArgs::default()
                 .image_url(
                     ImageUrlArgs::default()
@@ -465,10 +653,10 @@ IMPORTANT:
                 .into(),
         );
 
-        // Add historical screenshots in reverse chronological order (oldest first)
+        // Add historical screenshots in reverse chronological order
         for (_, _, _, screenshot) in iterations_history.iter().rev() {
             if let Some(base64_img) = screenshot {
-                content_parts.push(
+                new_content_parts.push(
                     ChatCompletionRequestMessageContentPartImageArgs::default()
                         .image_url(
                             ImageUrlArgs::default()
@@ -489,7 +677,7 @@ IMPORTANT:
             .model(&model_name)
             .max_tokens(max_tokens)
             .messages([ChatCompletionRequestUserMessageArgs::default()
-                .content(content_parts)
+                .content(new_content_parts)
                 .build()
                 .unwrap()
                 .into()])
@@ -607,37 +795,16 @@ Example valid response:
         let action_file_name = format!("{}/actions.json", iteration_dir);
         fs::write(&action_file_name, clean_action).unwrap();
 
-        // Save metadata with enhanced information
-        let (is_complete, feedback) = is_task_complete(&clean_analysis, &instruction);
-        let status = if is_complete {
-            "completed"
-        } else {
-            "in_progress"
-        };
-
-        let metadata = serde_json::json!({
-            "timestamp": timestamp,
-            "instruction": instruction,
-            "model": model_name,
-            "screenshot": "screenshot.png",
-            "screenshot_resized": "screenshot_resized.png",
-            "analysis": "analysis.json",
-            "actions": "actions.json",
-            "status": status,
-            "feedback": feedback
-        });
-        let metadata_file_name = format!("{}/metadata.json", iteration_dir);
-        fs::write(
-            &metadata_file_name,
-            serde_json::to_string_pretty(&metadata).unwrap(),
-        )
-        .unwrap();
-
         // Generate self-instruction for next iteration if task is not complete
-        if !is_complete {
-            let new_instruction =
-                generate_self_instruction(&client, &model_name, &iterations_history, &instruction)
-                    .await;
+        if task_state.status != "completed" {
+            let new_instruction = generate_self_instruction(
+                &client,
+                &model_name,
+                &iterations_history,
+                &instruction,
+                &task_state,
+            )
+            .await;
             println!("Generated new instruction: {}", new_instruction);
             *current_instruction.lock().unwrap() = new_instruction;
         }
@@ -648,7 +815,7 @@ Example valid response:
             continue;
         }
 
-        // Parse and execute the actions
+        // Stage 3: Execution
         if let Ok(actions) = serde_json::from_str::<Vec<serde_json::Value>>(clean_action) {
             for action in actions {
                 if !*should_continue.lock().unwrap() {
