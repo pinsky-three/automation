@@ -10,7 +10,6 @@ use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings
 use fs_extra::dir;
 use image::imageops::FilterType;
 use image::{GenericImageView, ImageFormat, ImageReader};
-use serde_json;
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -187,7 +186,7 @@ async fn main() {
             .trim();
 
         // Parse the JSON response and execute the actions
-        if let Ok(actions) = serde_json::from_str::<Vec<serde_json::Value>>(&clean_json) {
+        if let Ok(actions) = serde_json::from_str::<Vec<serde_json::Value>>(clean_json) {
             for action in actions {
                 if !*should_continue.lock().unwrap() {
                     break;
@@ -253,8 +252,4 @@ async fn main() {
 
     // Wait for the input thread to finish
     input_handle.join().unwrap();
-}
-
-fn normalized(filename: String) -> String {
-    filename.replace(['|', '\\', ':', '/'], "")
 }
