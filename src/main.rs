@@ -21,9 +21,7 @@ async fn main() {
     let client = Client::with_config(
         OpenAIConfig::new()
             .with_api_base("https://openrouter.ai/api/v1")
-            .with_api_key(
-                "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",
-            ),
+            .with_api_key(""),
     );
 
     // let image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg";
