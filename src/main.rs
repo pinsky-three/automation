@@ -126,7 +126,7 @@ async fn main() {
         let img = img.decode().unwrap();
 
         let (w, h) = img.dimensions();
-        let img = img.resize(w / 4, h / 4, FilterType::CatmullRom);
+        let img = img.resize(w / 3, h / 3, FilterType::CatmullRom);
 
         img.save("target/monitors/monitor-1-resized.png").unwrap();
 
@@ -149,37 +149,51 @@ async fn main() {
         // Stage 1: Analysis
         let analysis_request = CreateChatCompletionRequestArgs::default()
             .model(&model_name)
-            .max_tokens(300_u32)
+            .max_tokens(512_u32)
             .messages([ChatCompletionRequestUserMessageArgs::default()
                 .content(vec![
                     ChatCompletionRequestMessageContentPartTextArgs::default()
-                        .text(format!("Analyze this screenshot and provide a detailed context analysis. Consider:
-1. Current context (e.g., browser window, text editor, desktop)
-2. Visible UI elements (buttons, text fields, menus) with their coordinates
-3. Current state (e.g., text selected, window focused)
-4. Any potential obstacles or challenges
+                        .text(format!("Analyze this screenshot and provide a STRICT JSON response. Your response must be a valid JSON object with EXACTLY these fields:
+
+{{
+    \"context\": string,           // Current application/window context
+    \"ui_elements\": [            // Array of visible UI elements
+        {{
+            \"type\": string,     // Element type (e.g., \"button\", \"input\", \"menu\")
+            \"coords\": [         // [x1, y1, x2, y2] coordinates
+                number,           // Left edge
+                number,           // Top edge
+                number,           // Right edge
+                number            // Bottom edge
+            ]
+        }}
+    ],
+    \"state\": {{
+        \"focused_element\": string | null,  // Currently focused element type
+        \"selected_text\": string | null,    // Any selected text
+        \"active_window\": string,           // Active window/application
+        \"window_title\": string,            // Current window title
+        \"window_class\": string,            // Window class/type
+        \"target_window\": string | null     // Window that needs to be focused for the task
+    }},
+    \"challenges\": [             // Array of potential issues
+        string                    // Each challenge as a string
+    ]
+}}
 
 Screen Information:
 - Screen dimensions: {}x{} pixels
 - Coordinate system: (0,0) is at the top-left corner
 - High DPI display: Consider scaling factors when calculating coordinates
 
-Respond with a JSON object containing your analysis. Example format:
-{{
-    \"context\": \"Chrome browser window with google.com tab\",
-    \"ui_elements\": [
-        {{ \"type\": \"address_bar\", \"coords\": [100, 50, 500, 80] }},
-        {{ \"type\": \"new_tab_button\", \"coords\": [800, 10, 830, 40] }}
-    ],
-    \"state\": {{
-        \"focused_element\": \"address_bar\",
-        \"selected_text\": null,
-        \"active_window\": \"chrome\"
-    }},
-    \"challenges\": [
-        \"Need to ensure Chrome window is focused before actions\"
-    ]
-}}", screen_width, screen_height))
+IMPORTANT:
+1. Response must be ONLY the JSON object, no additional text
+2. All coordinates must be within screen bounds
+3. All fields are required
+4. Use null for empty values
+5. Do not include any explanations or comments in the JSON
+6. Always include window_title and window_class for proper window management
+7. Set target_window to the window that needs to be focused for the task (e.g., \"Chrome\" for web tasks)", screen_width, screen_height))
                         .build()
                         .unwrap()
                         .into(),
@@ -208,7 +222,7 @@ Respond with a JSON object containing your analysis. Example format:
             println!("Analysis Response: {}", analysis_json);
         }
 
-        // Clean up the analysis JSON
+        // Clean up and validate the analysis JSON
         let clean_analysis = analysis_json
             .trim()
             .trim_start_matches("```json")
@@ -216,41 +230,67 @@ Respond with a JSON object containing your analysis. Example format:
             .trim_end_matches("```")
             .trim();
 
+        // Validate analysis JSON structure
+        if let Err(e) = serde_json::from_str::<serde_json::Value>(clean_analysis) {
+            println!("Error: Invalid analysis JSON format: {}", e);
+            continue;
+        }
+
         // Stage 2: Action Planning
         let action_request = CreateChatCompletionRequestArgs::default()
             .model(&model_name)
-            .max_tokens(300_u32)
+            .max_tokens(512_u32)
             .messages([ChatCompletionRequestUserMessageArgs::default()
                 .content(vec![
                     ChatCompletionRequestMessageContentPartTextArgs::default()
-                        .text(format!("Based on this context analysis and the instruction '{}', plan a sequence of actions to accomplish the task.
+                        .text(format!("Based on this context analysis and the instruction '{}', plan a sequence of actions. Your response must be a STRICT JSON array of actions.
 
 Context Analysis:
 {}
 
-Available Basic Actions (use ONLY these):
-1. mouse_move(x, y): Move mouse to absolute coordinates
-2. mouse_click(button): Click mouse button (left, right, middle)
-3. key_press(key): Press a single key (return, tab, escape)
-4. key_combination(keys): Press multiple keys simultaneously (e.g., ['control', 't'] for Ctrl+T)
-5. text_input(text): Type text
-6. wait(ms): Wait for milliseconds
+Available Actions (use ONLY these exact formats):
+1. Window Focus:
+   {{ \"action\": \"window_focus\", \"title\": string, \"class\": string, \"method\": \"alt_tab\" | \"super_tab\" }}
 
-Guidelines for Reliable Automation:
-1. Always add small waits (100-500ms) between actions to ensure they complete
-2. For mouse movements, verify the target is visible in the screenshot
-3. For text input, ensure the target field is focused
-4. For key combinations, use the key_combination action instead of separate key_press actions
-5. Break complex tasks into small, reliable steps
-6. Consider the current context and state when planning actions
+2. Mouse Movement:
+   {{ \"action\": \"mouse_move\", \"x\": number, \"y\": number }}
 
-Respond with a JSON array of actions to accomplish the instruction. Example:
+3. Mouse Click:
+   {{ \"action\": \"mouse_click\", \"button\": \"left\" | \"right\" | \"middle\" }}
+
+4. Key Press:
+   {{ \"action\": \"key_press\", \"key\": \"return\" | \"tab\" | \"escape\" }}
+
+5. Key Combination:
+   {{ \"action\": \"key_combination\", \"keys\": [\"control\" | \"alt\" | \"shift\" | \"meta\", string] }}
+
+6. Text Input:
+   {{ \"action\": \"text_input\", \"text\": string }}
+
+7. Wait:
+   {{ \"action\": \"wait\", \"ms\": number }}
+
+Guidelines:
+1. Response must be ONLY the JSON array, no additional text
+2. Each action must follow the exact format shown above
+3. Wait times should be between 100-1000ms
+4. Mouse coordinates must be within screen bounds
+5. Key combinations must include at least one modifier key
+6. Do not include any explanations or comments in the JSON
+7. ALWAYS start with window_focus action if the target window is not already active
+8. Add a wait after window_focus to ensure the window is ready
+9. Use super_tab for window switching if alt_tab doesn't work
+10. Verify window focus before proceeding with actions
+
+Example valid response:
 [
-    {{\"action\": \"key_combination\", \"keys\": [\"control\", \"t\"]}},
-    {{\"action\": \"wait\", \"ms\": 500}},
-    {{\"action\": \"text_input\", \"text\": \"google.com\"}},
-    {{\"action\": \"wait\", \"ms\": 200}},
-    {{\"action\": \"key_press\", \"key\": \"return\"}}
+    {{ \"action\": \"window_focus\", \"title\": \"Google Chrome\", \"class\": \"chrome\", \"method\": \"super_tab\" }},
+    {{ \"action\": \"wait\", \"ms\": 500 }},
+    {{ \"action\": \"key_combination\", \"keys\": [\"control\", \"t\"] }},
+    {{ \"action\": \"wait\", \"ms\": 500 }},
+    {{ \"action\": \"text_input\", \"text\": \"google.com\" }},
+    {{ \"action\": \"wait\", \"ms\": 200 }},
+    {{ \"action\": \"key_press\", \"key\": \"return\" }}
 ]", instruction, clean_analysis))
                         .build()
                         .unwrap()
@@ -268,13 +308,19 @@ Respond with a JSON array of actions to accomplish the instruction. Example:
             println!("Action Plan: {}", action_json);
         }
 
-        // Clean up the action JSON
+        // Clean up and validate the action JSON
         let clean_action = action_json
             .trim()
             .trim_start_matches("```json")
             .trim_start_matches("```")
             .trim_end_matches("```")
             .trim();
+
+        // Validate action JSON structure
+        if let Err(e) = serde_json::from_str::<Vec<serde_json::Value>>(clean_action) {
+            println!("Error: Invalid action JSON format: {}", e);
+            continue;
+        }
 
         // Parse and execute the actions
         if let Ok(actions) = serde_json::from_str::<Vec<serde_json::Value>>(clean_action) {
@@ -283,6 +329,32 @@ Respond with a JSON array of actions to accomplish the instruction. Example:
                     break;
                 }
                 match action["action"].as_str() {
+                    Some("window_focus") => {
+                        if let (Some(title), Some(class), Some(method)) = (
+                            action["title"].as_str(),
+                            action["class"].as_str(),
+                            action["method"].as_str(),
+                        ) {
+                            println!("Focusing window: {} ({}) using {}", title, class, method);
+                            match method {
+                                "alt_tab" => {
+                                    enigo.key(Key::Alt, Direction::Press).unwrap();
+                                    sleep(Duration::from_millis(100));
+                                    enigo.key(Key::Tab, Direction::Click).unwrap();
+                                    sleep(Duration::from_millis(100));
+                                    enigo.key(Key::Alt, Direction::Release).unwrap();
+                                }
+                                "super_tab" => {
+                                    enigo.key(Key::Meta, Direction::Press).unwrap();
+                                    sleep(Duration::from_millis(100));
+                                    enigo.key(Key::Tab, Direction::Click).unwrap();
+                                    sleep(Duration::from_millis(100));
+                                    enigo.key(Key::Meta, Direction::Release).unwrap();
+                                }
+                                _ => println!("Unknown window focus method: {}", method),
+                            }
+                        }
+                    }
                     Some("mouse_move") => {
                         if let (Some(x), Some(y)) = (action["x"].as_i64(), action["y"].as_i64()) {
                             println!("Moving mouse to ({}, {})", x, y);
