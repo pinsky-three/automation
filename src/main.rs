@@ -1,3 +1,4 @@
+mod models;
 use async_openai::Client;
 use async_openai::config::OpenAIConfig;
 use async_openai::types::{
@@ -11,6 +12,7 @@ use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings
 use fs_extra::dir;
 use image::imageops::FilterType;
 use image::{GenericImageView, ImageFormat, ImageReader};
+use models::{ActionResult, TaskState};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -21,190 +23,6 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{thread::sleep, time::Duration};
 use xcap::Monitor;
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct TaskState {
-    status: String,      // "in_progress", "completed", "paused", "failed", "task_done"
-    attempts: u32,       // Number of attempts made
-    last_action: String, // Last action taken
-    success_criteria: Vec<String>, // Criteria for task completion
-    memory: HashMap<String, String>, // Persistent memory across iterations
-    feedback: Vec<String>, // Feedback from previous attempts
-    start_time: i64,     // Unix timestamp when task started
-    last_update: i64,    // Unix timestamp of last update
-    action_results: Vec<ActionResult>, // Results of previous actions
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct ActionResult {
-    action_type: String,           // Type of action performed
-    success: bool,                 // Whether the action was successful
-    timestamp: i64,                // When the action was performed
-    error_message: Option<String>, // Error message if the action failed
-    retry_count: u32,              // Number of retries attempted
-}
-
-impl ActionResult {
-    fn new(action_type: &str) -> Self {
-        ActionResult {
-            action_type: action_type.to_string(),
-            success: false,
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
-            error_message: None,
-            retry_count: 0,
-        }
-    }
-
-    fn success(mut self) -> Self {
-        self.success = true;
-        self
-    }
-
-    fn with_error(mut self, error: &str) -> Self {
-        self.error_message = Some(error.to_string());
-        self
-    }
-
-    fn increment_retry(mut self) -> Self {
-        self.retry_count += 1;
-        self
-    }
-}
-
-impl TaskState {
-    fn new() -> Self {
-        TaskState {
-            status: "in_progress".to_string(),
-            attempts: 0,
-            last_action: String::new(),
-            success_criteria: vec![
-                "Task completed".to_string(),
-                "Information found".to_string(),
-                "Research complete".to_string(),
-                "Task done".to_string(), // Added new success criterion
-            ],
-            memory: HashMap::new(),
-            feedback: Vec::new(),
-            start_time: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
-            last_update: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs() as i64,
-            action_results: Vec::new(),
-        }
-    }
-
-    fn update(&mut self, analysis: &str, actions: &str) {
-        self.attempts += 1;
-        self.last_update = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-
-        // Parse the last action from actions JSON
-        if let Ok(actions_json) = serde_json::from_str::<Vec<serde_json::Value>>(actions) {
-            if let Some(last_action) = actions_json.last() {
-                if let Some(action_type) = last_action["action"].as_str() {
-                    self.last_action = action_type.to_string();
-                }
-            }
-        }
-
-        // Update memory based on analysis
-        if let Ok(analysis_json) = serde_json::from_str::<serde_json::Value>(analysis) {
-            if let Some(context) = analysis_json["context"].as_str() {
-                self.memory
-                    .insert("last_context".to_string(), context.to_string());
-            }
-            if let Some(state) = analysis_json["state"].as_object() {
-                if let Some(window_title) = state["window_title"].as_str() {
-                    self.memory
-                        .insert("last_window".to_string(), window_title.to_string());
-                }
-            }
-            // Add feedback from challenges
-            if let Some(challenges) = analysis_json["challenges"].as_array() {
-                for challenge in challenges {
-                    if let Some(challenge_str) = challenge.as_str() {
-                        self.feedback.push(challenge_str.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    fn should_pause(&self) -> bool {
-        // Pause if too many attempts
-        if self.attempts > 10 {
-            return true;
-        }
-
-        // Pause if stuck in a loop (same action repeated)
-        if self.attempts > 3 {
-            let last_actions: Vec<String> = self
-                .feedback
-                .iter()
-                .rev()
-                .take(3)
-                .filter_map(|f| f.split(":").next().map(|s| s.to_string()))
-                .collect();
-
-            if last_actions.len() == 3
-                && last_actions[0] == last_actions[1]
-                && last_actions[1] == last_actions[2]
-            {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    fn is_complete(&self, analysis: &str) -> bool {
-        // Don't complete if we haven't taken any actions yet
-        if self.attempts < 2 {
-            return false;
-        }
-
-        // Check if all success criteria are met
-        for criterion in &self.success_criteria {
-            if !analysis.contains(criterion) {
-                return false;
-            }
-        }
-
-        // Check if there are no challenges
-        if let Ok(analysis_json) = serde_json::from_str::<serde_json::Value>(analysis) {
-            if let Some(challenges) = analysis_json["challenges"].as_array() {
-                if !challenges.is_empty() {
-                    return false;
-                }
-            }
-        }
-
-        // Check if we have performed meaningful actions
-        if self.last_action.is_empty() {
-            return false;
-        }
-
-        true
-    }
-
-    // New method to explicitly set task to done state
-    fn set_task_done(&mut self) {
-        self.status = "task_done".to_string();
-        self.last_update = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-    }
-}
 
 // Function to load or create task state
 fn load_task_state(iteration_dir: &str) -> TaskState {
@@ -378,8 +196,8 @@ async fn generate_self_instruction(
     // Use task state for feedback instead of is_task_complete
     let feedback = if task_state.status == "completed" {
         "Task completed successfully".to_string()
-    } else if !task_state.feedback.is_empty() {
-        task_state.feedback.last().unwrap().clone()
+    } else if task_state.status == "task_done" {
+        "Task done, waiting for new instructions".to_string()
     } else {
         "Task in progress".to_string()
     };
@@ -400,9 +218,8 @@ Feedback from last attempt: {}
 
 Current Task State:
 - Status: {}
-- Attempts: {}
-- Last Action: {}
-- Memory: {:?}
+- Last Update: {}
+- Action Results: {}
 
 Generate a new instruction that:
 1. Addresses the feedback from previous attempts
@@ -413,9 +230,8 @@ Generate a new instruction that:
 Response should be ONLY the new instruction, no additional text.",
                         current_instruction, history_text, feedback,
                         task_state.status,
-                        task_state.attempts,
-                        task_state.last_action,
-                        task_state.memory
+                        task_state.last_update,
+                        task_state.action_results.len()
                     ))
                     .build()
                     .unwrap()
@@ -440,213 +256,109 @@ Response should be ONLY the new instruction, no additional text.",
 }
 
 // Function to verify if an action was successful
-fn verify_action(
-    action: &serde_json::Value,
-    analysis_json: &serde_json::Value,
-    task_state: &mut TaskState,
-) -> ActionResult {
+fn verify_action(action: &serde_json::Value, task_state: &mut TaskState) -> ActionResult {
     let mut result = ActionResult::new(action["action"].as_str().unwrap_or("unknown"));
 
     // Get UI elements from analysis
-    let ui_elements = if let Some(elements) = analysis_json["ui_elements"].as_array() {
-        elements
-    } else {
-        result.error_message = Some("No UI elements found in analysis".to_string());
-        return result;
-    };
-
-    // Get current state from analysis
-    let state = if let Some(state_obj) = analysis_json["state"].as_object() {
+    let analysis = task_state.analysis.clone();
+    let state = if let Some(state_obj) = analysis.get("state").and_then(|s| s.as_object()) {
         state_obj
     } else {
-        result.error_message = Some("No state information found in analysis".to_string());
         return result;
     };
 
-    // Verify based on action type
     match action["action"].as_str() {
         Some("window_focus") => {
-            if let (Some(title), Some(class)) = (action["title"].as_str(), action["class"].as_str())
-            {
-                if let Some(active_window) = state["active_window"].as_str() {
-                    if active_window.to_lowercase().contains(&title.to_lowercase()) {
-                        result = result.success();
-                    } else {
-                        result.error_message = Some(format!(
-                            "Window focus failed. Expected: {}, Got: {}",
-                            title, active_window
-                        ));
-                    }
+            let title = action["title"].as_str().unwrap_or("");
+            if let Some(active_window) = state["active_window"].as_str() {
+                if active_window.to_lowercase().contains(&title.to_lowercase()) {
+                    result.mark_success();
                 } else {
-                    result.error_message = Some("Could not determine active window".to_string());
+                    result.mark_error(&format!(
+                        "Window focus failed. Expected: {}, Got: {}",
+                        title, active_window
+                    ));
                 }
             } else {
-                result.error_message =
-                    Some("Missing title or class in window_focus action".to_string());
+                result.mark_error("No active window information available");
             }
         }
         Some("mouse_move") | Some("mouse_click") => {
             // For mouse actions, we can't directly verify if they worked
             // Instead, we'll check if the UI state changed after the action
-            // This is a simplified approach - in a real implementation, you'd want to
-            // compare the UI state before and after the action
-            result = result.success();
+            result.mark_success();
         }
         Some("key_press") | Some("key_combination") | Some("text_input") => {
             // For keyboard actions, we can't directly verify if they worked
             // Instead, we'll check if the UI state changed after the action
-            result = result.success();
+            result.mark_success();
         }
         Some("wait") => {
             // Wait actions always succeed
-            result = result.success();
+            result.mark_success();
         }
         Some("task_done") => {
             // Task done actions always succeed
-            result = result.success();
+            result.mark_success();
         }
         _ => {
-            result.error_message = Some(format!(
-                "Unknown action type: {}",
-                action["action"].as_str().unwrap_or("unknown")
-            ));
+            result.mark_error("Unknown action type");
         }
     }
-
-    // Add the result to the task state
-    task_state.action_results.push(result.clone());
 
     result
 }
 
 // Function to retry a failed action with adjusted parameters
-fn retry_action(
-    action: &serde_json::Value,
-    analysis_json: &serde_json::Value,
-    task_state: &mut TaskState,
-    enigo: &mut Enigo,
-) -> ActionResult {
-    let mut result = verify_action(action, analysis_json, task_state);
+fn retry_action(action: &serde_json::Value, task_state: &mut TaskState) -> ActionResult {
+    let mut result = ActionResult::new(action["action"].as_str().unwrap_or("unknown"));
+    result.increment_retry();
 
-    // If the action failed and we haven't retried too many times, try again with adjustments
-    if !result.success && result.retry_count < 3 {
-        result = result.increment_retry();
+    // Get UI elements from analysis
+    let analysis = task_state.analysis.clone();
+    let state = if let Some(state_obj) = analysis.get("state").and_then(|s| s.as_object()) {
+        state_obj
+    } else {
+        return result;
+    };
 
-        // Get the last result for this action type
-        let last_result = task_state
-            .action_results
-            .iter()
-            .filter(|r| r.action_type == result.action_type)
-            .last();
-
-        // Adjust the action based on the previous failure
-        match action["action"].as_str() {
-            Some("window_focus") => {
-                // Try a different method for window focus
-                if let Some(method) = action["method"].as_str() {
-                    let new_method = if method == "alt_tab" {
-                        "super_tab"
-                    } else {
-                        "alt_tab"
-                    };
-                    println!("Retrying window focus with method: {}", new_method);
-
-                    if let (Some(title), Some(class)) =
-                        (action["title"].as_str(), action["class"].as_str())
-                    {
-                        match new_method {
-                            "alt_tab" => {
-                                enigo.key(Key::Alt, Direction::Press).unwrap();
-                                sleep(Duration::from_millis(100));
-                                enigo.key(Key::Tab, Direction::Click).unwrap();
-                                sleep(Duration::from_millis(100));
-                                enigo.key(Key::Alt, Direction::Release).unwrap();
-                            }
-                            "super_tab" => {
-                                enigo.key(Key::Meta, Direction::Press).unwrap();
-                                sleep(Duration::from_millis(100));
-                                enigo.key(Key::Tab, Direction::Click).unwrap();
-                                sleep(Duration::from_millis(100));
-                                enigo.key(Key::Meta, Direction::Release).unwrap();
-                            }
-                            _ => {}
-                        }
-                    }
+    match action["action"].as_str() {
+        Some("window_focus") => {
+            let title = action["title"].as_str().unwrap_or("");
+            if let Some(active_window) = state["active_window"].as_str() {
+                if active_window.to_lowercase().contains(&title.to_lowercase()) {
+                    result.mark_success();
+                } else {
+                    result.mark_error(&format!(
+                        "Window focus failed. Expected: {}, Got: {}",
+                        title, active_window
+                    ));
                 }
-            }
-            Some("mouse_move") | Some("mouse_click") => {
-                // Adjust mouse coordinates based on UI elements
-                if let (Some(x), Some(y)) = (action["x"].as_i64(), action["y"].as_i64()) {
-                    // Get UI elements from analysis
-                    if let Some(elements) = analysis_json["ui_elements"].as_array() {
-                        // Find the closest UI element to the target coordinates
-                        let mut closest_element = None;
-                        let mut min_distance = f64::MAX;
-
-                        for element in elements {
-                            if let Some(coords) = element["coords"].as_array() {
-                                if coords.len() >= 4 {
-                                    if let (Some(x1), Some(y1), Some(x2), Some(y2)) = (
-                                        coords[0].as_i64(),
-                                        coords[1].as_i64(),
-                                        coords[2].as_i64(),
-                                        coords[3].as_i64(),
-                                    ) {
-                                        // Calculate center of the element
-                                        let center_x = (x1 + x2) / 2;
-                                        let center_y = (y1 + y2) / 2;
-
-                                        // Calculate distance to target
-                                        let distance =
-                                            ((center_x - x).pow(2) + (center_y - y).pow(2)) as f64;
-
-                                        if distance < min_distance {
-                                            min_distance = distance;
-                                            closest_element = Some((center_x, center_y));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // If we found a close element, use its coordinates
-                        if let Some((new_x, new_y)) = closest_element {
-                            println!("Adjusting mouse coordinates to ({}, {})", new_x, new_y);
-
-                            // Move to the new coordinates
-                            enigo
-                                .move_mouse(new_x as i32, new_y as i32, Coordinate::Abs)
-                                .unwrap();
-
-                            // If this is a click action, click at the new coordinates
-                            if action["action"].as_str() == Some("mouse_click") {
-                                if let Some(button) = action["button"].as_str() {
-                                    match button {
-                                        "left" => {
-                                            enigo.button(Button::Left, Direction::Click).unwrap()
-                                        }
-                                        "right" => {
-                                            enigo.button(Button::Right, Direction::Click).unwrap()
-                                        }
-                                        "middle" => {
-                                            enigo.button(Button::Middle, Direction::Click).unwrap()
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {
-                // For other actions, just wait a bit longer and try again
-                sleep(Duration::from_millis(500));
+            } else {
+                result.mark_error("No active window information available");
             }
         }
-
-        // Verify the action again after retry
-        result = verify_action(action, analysis_json, task_state);
+        Some("mouse_move") | Some("mouse_click") => {
+            // For mouse actions, we can't directly verify if they worked
+            // Instead, we'll check if the UI state changed after the action
+            result.mark_success();
+        }
+        Some("key_press") | Some("key_combination") | Some("text_input") => {
+            // For keyboard actions, we can't directly verify if they worked
+            // Instead, we'll check if the UI state changed after the action
+            result.mark_success();
+        }
+        Some("wait") => {
+            // Wait actions always succeed
+            result.mark_success();
+        }
+        Some("task_done") => {
+            // Task done actions always succeed
+            result.mark_success();
+        }
+        _ => {
+            result.mark_error("Unknown action type");
+        }
     }
 
     result
@@ -804,14 +516,21 @@ async fn main() {
         // Load or create task state
         let mut task_state = load_task_state(&iteration_dir);
 
-        // If we're coming from a task_done state and have a new instruction, reset the task state
+        // Check if we have a new instruction after task_done
         if task_state.status == "task_done" && !instruction.is_empty() {
             println!("Starting new task with instruction: {}", instruction);
             task_state = TaskState::new();
+            *is_idle.lock().unwrap() = false; // Ensure we're not in idle mode for the new task
+        }
+
+        // If we're in task_done state, wait a bit before checking for new instructions
+        if task_state.status == "task_done" {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            continue;
         }
 
         // Update task state with current iteration
-        task_state.update(&history_text, &history_text);
+        task_state.update(serde_json::from_str(&history_text).unwrap_or(serde_json::json!({})));
 
         // Check if we should pause
         if task_state.should_pause() {
@@ -823,22 +542,11 @@ async fn main() {
         }
 
         // Check if task is complete
-        if task_state.is_complete(&history_text) {
-            println!(
-                "Task completed successfully after {} attempts!",
-                task_state.attempts
-            );
+        if task_state.is_complete() {
+            println!("Task completed successfully!");
             task_state.status = "completed".to_string();
             save_task_state(&iteration_dir, &task_state);
             break;
-        }
-
-        // Check if task is in task_done state
-        if task_state.status == "task_done" {
-            println!("Task is in 'task_done' state. Waiting for new instructions...");
-            *is_idle.lock().unwrap() = true;
-            save_task_state(&iteration_dir, &task_state);
-            continue;
         }
 
         // Save updated task state
@@ -848,15 +556,21 @@ async fn main() {
         let state_context = format!(
             "\nTASK STATE:
 - Status: {}
-- Attempts: {}
-- Last Action: {}
-- Memory: {:?}
-- Feedback: {:?}",
+- Last Update: {}
+- Action Results: {}",
             task_state.status,
-            task_state.attempts,
-            task_state.last_action,
-            task_state.memory,
-            task_state.feedback
+            task_state.last_update,
+            task_state.action_results.len()
+        );
+
+        println!(
+            "Current task state:
+- Status: {}
+- Last Update: {}
+- Action Results: {}",
+            task_state.status,
+            task_state.last_update,
+            task_state.action_results.len()
         );
 
         // Create new content parts with task state
@@ -1208,14 +922,18 @@ Example valid response:
                                 serde_json::from_str::<serde_json::Value>(&clean_verify_analysis)
                             {
                                 // Verify the action
-                                retry_action(&action, &verify_json, &mut task_state, &mut enigo)
+                                verify_action(&action, &mut task_state)
                             } else {
                                 println!("Error: Could not parse verification analysis JSON");
-                                ActionResult::new("window_focus").with_error("Verification failed")
+                                let mut result = ActionResult::new("window_focus");
+                                result.mark_error("Verification failed");
+                                result
                             }
                         } else {
                             println!("Error: Missing parameters for window_focus action");
-                            ActionResult::new("window_focus").with_error("Missing parameters")
+                            let mut result = ActionResult::new("window_focus");
+                            result.mark_error("Missing parameters");
+                            result
                         }
                     }
                     Some("mouse_move") => {
@@ -1226,10 +944,12 @@ Example valid response:
                                 .unwrap();
 
                             // Verify the action
-                            retry_action(&action, &analysis_json, &mut task_state, &mut enigo)
+                            verify_action(&action, &mut task_state)
                         } else {
                             println!("Error: Missing coordinates for mouse_move action");
-                            ActionResult::new("mouse_move").with_error("Missing coordinates")
+                            let mut result = ActionResult::new("mouse_move");
+                            result.mark_error("Missing coordinates");
+                            result
                         }
                     }
                     Some("mouse_click") => {
@@ -1243,10 +963,12 @@ Example valid response:
                             }
 
                             // Verify the action
-                            retry_action(&action, &analysis_json, &mut task_state, &mut enigo)
+                            verify_action(&action, &mut task_state)
                         } else {
                             println!("Error: Missing button for mouse_click action");
-                            ActionResult::new("mouse_click").with_error("Missing button")
+                            let mut result = ActionResult::new("mouse_click");
+                            result.mark_error("Missing button");
+                            result
                         }
                     }
                     Some("key_press") => {
@@ -1262,10 +984,12 @@ Example valid response:
                             }
 
                             // Verify the action
-                            retry_action(&action, &analysis_json, &mut task_state, &mut enigo)
+                            verify_action(&action, &mut task_state)
                         } else {
                             println!("Error: Missing key for key_press action");
-                            ActionResult::new("key_press").with_error("Missing key")
+                            let mut result = ActionResult::new("key_press");
+                            result.mark_error("Missing key");
+                            result
                         }
                     }
                     Some("key_combination") => {
@@ -1337,10 +1061,12 @@ Example valid response:
                             }
 
                             // Verify the action
-                            retry_action(&action, &analysis_json, &mut task_state, &mut enigo)
+                            verify_action(&action, &mut task_state)
                         } else {
                             println!("Error: Missing keys for key_combination action");
-                            ActionResult::new("key_combination").with_error("Missing keys")
+                            let mut result = ActionResult::new("key_combination");
+                            result.mark_error("Missing keys");
+                            result
                         }
                     }
                     Some("text_input") => {
@@ -1349,10 +1075,12 @@ Example valid response:
                             enigo.text(text).unwrap();
 
                             // Verify the action
-                            retry_action(&action, &analysis_json, &mut task_state, &mut enigo)
+                            verify_action(&action, &mut task_state)
                         } else {
                             println!("Error: Missing text for text_input action");
-                            ActionResult::new("text_input").with_error("Missing text")
+                            let mut result = ActionResult::new("text_input");
+                            result.mark_error("Missing text");
+                            result
                         }
                     }
                     Some("wait") => {
@@ -1361,10 +1089,14 @@ Example valid response:
                             sleep(Duration::from_millis(ms as u64));
 
                             // Wait actions always succeed
-                            ActionResult::new("wait").success()
+                            let mut result = ActionResult::new("wait");
+                            result.mark_success();
+                            result
                         } else {
                             println!("Error: Missing ms for wait action");
-                            ActionResult::new("wait").with_error("Missing ms")
+                            let mut result = ActionResult::new("wait");
+                            result.mark_error("Missing ms");
+                            result
                         }
                     }
                     Some("task_done") => {
@@ -1375,15 +1107,21 @@ Example valid response:
                             *is_idle.lock().unwrap() = true;
 
                             // Task done actions always succeed
-                            ActionResult::new("task_done").success()
+                            let mut result = ActionResult::new("task_done");
+                            result.mark_success();
+                            result
                         } else {
                             println!("Error: Missing reason for task_done action");
-                            ActionResult::new("task_done").with_error("Missing reason")
+                            let mut result = ActionResult::new("task_done");
+                            result.mark_error("Missing reason");
+                            result
                         }
                     }
                     _ => {
                         println!("Unknown action: {:?}", action["action"]);
-                        ActionResult::new("unknown").with_error("Unknown action type")
+                        let mut result = ActionResult::new("unknown");
+                        result.mark_error("Unknown action type");
+                        result
                     }
                 };
 
