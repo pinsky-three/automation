@@ -24,14 +24,14 @@ use xcap::Monitor;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct TaskState {
-    status: String,                  // "in_progress", "completed", "paused", "failed"
-    attempts: u32,                   // Number of attempts made
-    last_action: String,             // Last action taken
-    success_criteria: Vec<String>,   // Criteria for task completion
+    status: String,      // "in_progress", "completed", "paused", "failed", "task_done"
+    attempts: u32,       // Number of attempts made
+    last_action: String, // Last action taken
+    success_criteria: Vec<String>, // Criteria for task completion
     memory: HashMap<String, String>, // Persistent memory across iterations
-    feedback: Vec<String>,           // Feedback from previous attempts
-    start_time: i64,                 // Unix timestamp when task started
-    last_update: i64,                // Unix timestamp of last update
+    feedback: Vec<String>, // Feedback from previous attempts
+    start_time: i64,     // Unix timestamp when task started
+    last_update: i64,    // Unix timestamp of last update
 }
 
 impl TaskState {
@@ -44,6 +44,7 @@ impl TaskState {
                 "Task completed".to_string(),
                 "Information found".to_string(),
                 "Research complete".to_string(),
+                "Task done".to_string(), // Added new success criterion
             ],
             memory: HashMap::new(),
             feedback: Vec::new(),
@@ -152,6 +153,15 @@ impl TaskState {
         }
 
         true
+    }
+
+    // New method to explicitly set task to done state
+    fn set_task_done(&mut self) {
+        self.status = "task_done".to_string();
+        self.last_update = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
     }
 }
 
@@ -433,6 +443,9 @@ async fn main() {
         println!("  resume - Resume the automation");
         println!("  help - Show this help message");
         println!("  Any other input will be treated as an instruction for the AI");
+        println!(
+            "Note: The AI can put itself in a 'task_done' state and wait for new instructions."
+        );
         println!("Waiting for your first instruction...");
 
         while *should_continue_clone.lock().unwrap() {
@@ -461,6 +474,9 @@ async fn main() {
                         println!("  resume - Resume the automation");
                         println!("  help - Show this help message");
                         println!("  Any other input will be treated as an instruction for the AI");
+                        println!(
+                            "Note: The AI can put itself in a 'task_done' state and wait for new instructions."
+                        );
                     }
                     _ => {
                         *current_instruction_clone.lock().unwrap() = input.to_string();
@@ -555,6 +571,14 @@ async fn main() {
             task_state.status = "completed".to_string();
             save_task_state(&iteration_dir, &task_state);
             break;
+        }
+
+        // Check if task is in task_done state
+        if task_state.status == "task_done" {
+            println!("Task is in 'task_done' state. Waiting for new instructions...");
+            *is_idle.lock().unwrap() = true;
+            save_task_state(&iteration_dir, &task_state);
+            continue;
         }
 
         // Save updated task state
@@ -744,6 +768,9 @@ Available Actions (use ONLY these exact formats):
 
 7. Wait:
    {{ \"action\": \"wait\", \"ms\": number }}
+   
+8. Task Done:
+   {{ \"action\": \"task_done\", \"reason\": string }}
 
 Guidelines:
 1. Response must be ONLY the JSON array, no additional text
@@ -959,6 +986,14 @@ Example valid response:
                         if let Some(ms) = action["ms"].as_i64() {
                             println!("Waiting for {}ms", ms);
                             sleep(Duration::from_millis(ms as u64));
+                        }
+                    }
+                    Some("task_done") => {
+                        if let Some(reason) = action["reason"].as_str() {
+                            println!("Task done. Reason: {}", reason);
+                            task_state.set_task_done();
+                            save_task_state(&iteration_dir, &task_state);
+                            *is_idle.lock().unwrap() = true;
                         }
                     }
                     _ => println!("Unknown action: {:?}", action["action"]),
