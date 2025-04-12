@@ -3,9 +3,12 @@ mod actuators;
 use async_openai::Client;
 use async_openai::config::OpenAIConfig;
 use async_openai::types::{
-    ChatCompletionRequestMessageContentPartImageArgs,
-    ChatCompletionRequestMessageContentPartTextArgs, ChatCompletionRequestUserMessageArgs,
-    CreateChatCompletionRequestArgs, ImageDetail, ImageUrlArgs,
+    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
+    ChatCompletionRequestMessageContentPartImageArgs, ChatCompletionRequestMessageContentPartText,
+    ChatCompletionRequestMessageContentPartTextArgs, ChatCompletionRequestSystemMessage,
+    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
+    ChatCompletionRequestUserMessageContentPart, CreateChatCompletionRequestArgs, ImageDetail,
+    ImageUrlArgs,
 };
 use automation::senses::screens::Screens;
 use base64::Engine;
@@ -31,6 +34,7 @@ use crate::actuators::mouse::Mouse as CustomMouse;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct TaskState {
+    instruction: String,               // The instruction for the task
     status: String,      // "in_progress", "completed", "paused", "failed", "task_done"
     attempts: u32,       // Number of attempts made
     last_action: String, // Last action taken
@@ -82,8 +86,9 @@ impl ActionResult {
 }
 
 impl TaskState {
-    fn new() -> Self {
+    fn new(instruction: String) -> Self {
         TaskState {
+            instruction,
             status: "in_progress".to_string(),
             attempts: 0,
             last_action: String::new(),
@@ -223,7 +228,7 @@ fn load_task_state(iteration_dir: &str) -> TaskState {
             }
         }
     }
-    TaskState::new()
+    TaskState::new(String::new())
 }
 
 // Function to save task state
@@ -372,17 +377,17 @@ fn format_iterations_history(iterations: &[(String, String, String, Option<Strin
 async fn generate_self_instruction(
     client: &Client<OpenAIConfig>,
     model_name: &str,
-    history: &[(String, String, String, Option<String>)],
+    // history: &[(String, String, String, Option<String>)],
     current_instruction: &str,
     task_state: &TaskState,
     max_tokens: u32,
 ) -> String {
-    if history.is_empty() {
-        return current_instruction.to_string();
-    }
+    // if history.is_empty() {
+    //     return current_instruction.to_string();
+    // }
 
-    let history_text = format_iterations_history(history);
-    let last_iteration = &history[0];
+    // let history_text = format_iterations_history(history);
+    // let last_iteration = &history[0];
 
     // Use task state for feedback instead of is_task_complete
     let feedback = if task_state.status == "completed" {
@@ -402,9 +407,6 @@ async fn generate_self_instruction(
                     .text(format!(
                         "Based on the following history and feedback, generate a refined instruction to achieve the original goal: '{}'
 
-History:
-{}
-
 Feedback from last attempt: {}
 
 Current Task State:
@@ -420,7 +422,7 @@ Generate a new instruction that:
 4. Focuses on overcoming identified challenges
 
 Response should be ONLY the new instruction, no additional text.",
-                        current_instruction, history_text, feedback,
+                        current_instruction,  feedback,
                         task_state.status,
                         task_state.attempts,
                         task_state.last_action,
@@ -642,6 +644,21 @@ fn retry_action(
     result
 }
 
+struct Conversation {
+    messages: Vec<Message>,
+}
+
+struct Message {
+    role: String,
+    content: String,
+}
+
+fn load_conversation_history(n: usize) -> Conversation {
+    let conversation = Conversation { messages: vec![] };
+
+    conversation
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     dotenvy::dotenv().ok();
@@ -787,7 +804,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // println!("encode time: {:?}", start.elapsed());
 
         let base64_images = screens.capture_and_save_all_with_base64(&iteration_dir, 3)?;
-        let res_base64 = base64_images.first().unwrap();
+        // let res_base64 = base64_images.first().unwrap();
 
         println!("capture and encode time: {:?}", start.elapsed());
         // ---
@@ -797,8 +814,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let instruction = current_instruction.lock().unwrap().clone();
 
         // Get the last 3 iterations with screenshots for context
-        let iterations_history = get_last_n_iterations_with_screenshots(3);
-        let history_text = format_iterations_history(&iterations_history);
+        // let iterations_history = get_last_n_iterations_with_screenshots(3);
+
+        // println!("iterations_history (len): {:?}", iterations_history.len());
+        // let history_text = format_iterations_history(&iterations_history);
+
+        // let conversation = load_conversation_history(3);
 
         // Load or create task state
         let mut task_state = load_task_state(&iteration_dir);
@@ -806,31 +827,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // If we're coming from a task_done state and have a new instruction, reset the task state
         if task_state.status == "task_done" && !instruction.is_empty() {
             println!("Starting new task with instruction: {}", instruction);
-            task_state = TaskState::new();
+            task_state = TaskState::new(instruction.clone());
         }
 
         // Update task state with current iteration
-        task_state.update(&history_text, &history_text);
+        // // task_state.update(&history_text, &history_text);
 
-        // Check if we should pause
-        if task_state.should_pause() {
-            println!("Task paused due to too many attempts or detected loop");
-            task_state.status = "paused".to_string();
-            save_task_state(&iteration_dir, &task_state);
-            sleep(Duration::from_secs(5));
-            continue;
-        }
+        // // Check if we should pause
+        // if task_state.should_pause() {
+        //     println!("Task paused due to too many attempts or detected loop");
+        //     task_state.status = "paused".to_string();
+        //     save_task_state(&iteration_dir, &task_state);
+        //     sleep(Duration::from_secs(5));
+        //     continue;
+        // }
 
-        // Check if task is complete
-        if task_state.is_complete(&history_text) {
-            println!(
-                "Task completed successfully after {} attempts!",
-                task_state.attempts
-            );
-            task_state.status = "completed".to_string();
-            save_task_state(&iteration_dir, &task_state);
-            break;
-        }
+        // // Check if task is complete
+        // if task_state.is_complete(&history_text) {
+        //     println!(
+        //         "Task completed successfully after {} attempts!",
+        //         task_state.attempts
+        //     );
+        //     task_state.status = "completed".to_string();
+        //     save_task_state(&iteration_dir, &task_state);
+        //     break;
+        // }
 
         // Check if task is in task_done state
         if task_state.status == "task_done" {
@@ -846,11 +867,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // Add task state to the prompt
         let state_context = format!(
             "\nTASK STATE:
-- Status: {}
-- Attempts: {}
-- Last Action: {}
-- Memory: {:?}
-- Feedback: {:?}",
+        - Status: {}
+        - Attempts: {}
+        - Last Action: {}
+        - Memory: {:?}
+        - Feedback: {:?}",
             task_state.status,
             task_state.attempts,
             task_state.last_action,
@@ -858,112 +879,192 @@ async fn main() -> Result<(), Box<dyn Error>> {
             task_state.feedback
         );
 
-        // Create new content parts with task state
-        let mut new_content_parts = vec![
-            ChatCompletionRequestMessageContentPartTextArgs::default()
-                .text(format!("{}{}
-
-CURRENT STATE ANALYSIS:
-You are analyzing the current state of the screen. Below is the history of previous attempts for context.
-
-HISTORY OF PREVIOUS ATTEMPTS:
-{history}
-
-CURRENT SCREEN INFORMATION:
-- Screen dimensions: {width}x{height} pixels
-- Coordinate system: (0,0) is at the top-left corner
-- High DPI display: Consider scaling factors when calculating coordinates
-
-Analyze the CURRENT screenshot and provide a STRICT JSON response. Your response must be a valid JSON object with EXACTLY these fields:
-
-{{
-    \"context\": string,           // Current application/window context
-    \"ui_elements\": [            // Array of visible UI elements
-        {{
-            \"type\": string,     // Element type (e.g., \"button\", \"input\", \"menu\")
-            \"coords\": [         // [x1, y1, x2, y2] coordinates
-                number,           // Left edge
-                number,           // Top edge
-                number,           // Right edge
-                number            // Bottom edge
-            ]
-        }}
-    ],
-    \"state\": {{
-        \"focused_element\": string | null,  // Currently focused element type
-        \"selected_text\": string | null,    // Any selected text
-        \"active_window\": string,           // Active window/application
-        \"window_title\": string,            // Current window title
-        \"window_class\": string,            // Window class/type
-        \"target_window\": string | null     // Window that needs to be focused for the task
-    }},
-    \"challenges\": [             // Array of potential issues
-        string                    // Each challenge as a string
-    ]
-}}
-
-IMPORTANT:
-1. Response must be ONLY the JSON object, no additional text
-2. All coordinates must be within screen bounds
-3. All fields are required
-4. Use null for empty values
-5. Do not include any explanations or comments in the JSON
-6. Always include window_title and window_class for proper window management
-7. Set target_window to the window that needs to be focused for the task (e.g., \"Chrome\" for web tasks)
-8. ONLY analyze the CURRENT screenshot, not the historical ones", 
-                history_text,
-                state_context,
-                history = history_text,
-                width = screen_width,
-                height = screen_height))
-                .build()
-                .unwrap()
-                .into()
-        ];
-
-        // Add current screenshot
-        new_content_parts.push(
-            ChatCompletionRequestMessageContentPartImageArgs::default()
-                .image_url(
-                    ImageUrlArgs::default()
-                        .url(format!("data:image/png;base64,{}", res_base64))
-                        .detail(ImageDetail::High)
-                        .build()
-                        .unwrap(),
-                )
-                .build()
-                .unwrap()
-                .into(),
+        let system_message = format!(
+        "
+            You are a task automation agent.
+            You will be given a task to complete.
+            You will need to analyze the current state of the task and plan a sequence of actions to complete the task.
+            The current timestamp is: {}
+        ",
+            Local::now().format("%Y%m%d_%H%M%S").to_string()
         );
 
-        // Add historical screenshots in reverse chronological order
-        for (_, _, _, screenshot) in iterations_history.iter().rev() {
-            if let Some(base64_img) = screenshot {
-                new_content_parts.push(
-                    ChatCompletionRequestMessageContentPartImageArgs::default()
-                        .image_url(
-                            ImageUrlArgs::default()
-                                .url(format!("data:image/png;base64,{}", base64_img))
-                                .detail(ImageDetail::High)
-                                .build()
-                                .unwrap(),
-                        )
-                        .build()
-                        .unwrap()
-                        .into(),
-                );
-            }
+        struct HistoryMessage {
+            state_message: String,
+            screens_message: Vec<String>,
+            actions_message: String,
         }
+
+        let history_messages = vec![HistoryMessage {
+            state_message: "".to_string(),
+            screens_message: vec![],
+            actions_message: "".to_string(),
+        }];
+
+        let mut complete_chat_messages = vec![];
+
+        complete_chat_messages.push(ChatCompletionRequestMessage::System(
+            ChatCompletionRequestSystemMessageArgs::default()
+                .content(system_message)
+                .build()
+                .unwrap(),
+        ));
+
+        history_messages.iter().for_each(|message| {
+            let pair_frame = (
+                message.state_message.clone(),
+                message.screens_message.clone(),
+            );
+
+            let pairs = vec![pair_frame];
+
+            let messages = pairs.into_iter().map(|(state_message, screens_message)| {
+                // let mut message = ChatCompletionRequestMessageContentPartText::default();
+                // message.text = state_message.to_string();
+
+                let images = screens_message.into_iter().map(|screen_message| {
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                        ChatCompletionRequestMessageContentPartImageArgs::default()
+                            .image_url(screen_message)
+                            .build()
+                            .unwrap(),
+                    )
+                });
+
+                let state = ChatCompletionRequestUserMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartTextArgs::default()
+                        .text(state_message)
+                        .build()
+                        .unwrap(),
+                );
+
+                let mut message_batch = vec![];
+
+                message_batch.extend(images);
+                message_batch.push(state);
+
+                message_batch
+            });
+
+            complete_chat_messages.push(ChatCompletionRequestMessage::User(
+                ChatCompletionRequestUserMessageArgs::default()
+                    .content(messages.flatten().collect::<Vec<_>>())
+                    .build()
+                    .unwrap(),
+            ));
+
+            complete_chat_messages.push(ChatCompletionRequestMessage::Assistant(
+                ChatCompletionRequestAssistantMessageArgs::default()
+                    .content(message.actions_message.clone())
+                    .build()
+                    .unwrap(),
+            ));
+        });
+
+        // let actions_message = "";
+        let current_state_message = state_context.clone();
+        let current_screens_message = base64_images;
+
+        let current_pair_frame = (current_state_message, current_screens_message);
+
+        let current_pairs = vec![current_pair_frame];
+
+        let current_messages = current_pairs
+            .into_iter()
+            .map(|(state_message, screens_message)| {
+                // let mut message = ChatCompletionRequestMessageContentPartText::default();
+                // message.text = state_message.to_string();
+
+                let images = screens_message.into_iter().map(|screen_message| {
+                    ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                        ChatCompletionRequestMessageContentPartImageArgs::default()
+                            .image_url(screen_message)
+                            .build()
+                            .unwrap(),
+                    )
+                });
+
+                let state = ChatCompletionRequestUserMessageContentPart::Text(
+                    ChatCompletionRequestMessageContentPartTextArgs::default()
+                        .text(state_message)
+                        .build()
+                        .unwrap(),
+                );
+
+                let mut message_batch = vec![];
+
+                message_batch.extend(images);
+                message_batch.push(state);
+
+                message_batch
+            });
+
+        complete_chat_messages.push(ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(current_messages.flatten().collect::<Vec<_>>())
+                .build()
+                .unwrap(),
+        ));
+
+        complete_chat_messages.push(ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(
+                    format!("
+        GENERATE THE ANALYSIS JSON FOR THE CURRENT STATE.
+         CURRENT SCREEN INFORMATION:
+         - Screen dimensions: {width}x{height} pixels
+         - Coordinate system: (0,0) is at the top-left corner
+         - High DPI display: Consider scaling factors when calculating coordinates
+
+         Analyze the CURRENT screenshot and provide a STRICT JSON response. Your response must be a valid JSON object with EXACTLY these fields:
+
+         {{
+             \"context\": string,           // Current application/window context
+             \"ui_elements\": [            // Array of visible UI elements
+                 {{
+                     \"type\": string,     // Element type (e.g., \"button\", \"input\", \"menu\")
+                     \"coords\": [         // [x1, y1, x2, y2] coordinates
+                         number,           // Left edge
+                         number,           // Top edge
+                         number,           // Right edge
+                         number            // Bottom edge
+                     ]
+                 }}
+             ],
+             \"state\": {{
+                 \"focused_element\": string | null,  // Currently focused element type
+                 \"selected_text\": string | null,    // Any selected text
+                 \"active_window\": string,           // Active window/application
+                 \"window_title\": string,            // Current window title
+                 \"window_class\": string,            // Window class/type
+                 \"target_window\": string | null     // Window that needs to be focused for the task
+             }},
+             \"challenges\": [             // Array of potential issues
+                 string                    // Each challenge as a string
+             ]
+         }}
+
+         IMPORTANT:
+         1. Response must be ONLY the JSON object, no additional text
+         2. All coordinates must be within screen bounds
+         3. All fields are required
+         4. Use null for empty values
+         5. Do not include any explanations or comments in the JSON
+         6. Always include window_title and window_class for proper window management
+         7. Set target_window to the window that needs to be focused for the task (e.g., \"Chrome\" for web tasks)
+         8. ONLY analyze the CURRENT screenshot, not the historical ones",
+                        width = screen_width,
+                        height = screen_height)
+                )
+                .build()
+                .unwrap(),
+        ));
 
         // Stage 1: Analysis
         let analysis_request = CreateChatCompletionRequestArgs::default()
             .model(&model_name)
-            .max_tokens(1024_u32)
-            .messages([ChatCompletionRequestUserMessageArgs::default()
-                .content(new_content_parts)
-                .build()
-                .unwrap()
-                .into()])
+            .max_tokens(max_tokens)
+            .messages(complete_chat_messages)
             .build()
             .unwrap();
 
@@ -1047,7 +1148,7 @@ IMPORTANT:
             .messages([ChatCompletionRequestUserMessageArgs::default()
                 .content(vec![
                     ChatCompletionRequestMessageContentPartTextArgs::default()
-                        .text(format!("{}
+                        .text(format!("
 
 Based on this context analysis and the instruction '{}', plan a sequence of actions. Your response must be a STRICT JSON array of actions.
 
@@ -1100,7 +1201,7 @@ Example valid response:
     {{ \"action\": \"text_input\", \"text\": \"google.com\" }},
     {{ \"action\": \"wait\", \"ms\": 200 }},
     {{ \"action\": \"key_press\", \"key\": \"return\" }}
-]", history_text, instruction, serde_json::to_string_pretty(&parsed_analysis).unwrap_or_else(|_| clean_analysis.to_string())))
+]", instruction, serde_json::to_string_pretty(&parsed_analysis).unwrap_or_else(|_| clean_analysis.to_string())))
                         .build()
                         .unwrap()
                         .into()])
@@ -1134,7 +1235,7 @@ Example valid response:
             let new_instruction = generate_self_instruction(
                 &client,
                 &model_name,
-                &iterations_history,
+                // &iterations_history,
                 &instruction,
                 &task_state,
                 max_tokens,
