@@ -16,6 +16,7 @@ use image::imageops::FilterType;
 use image::{GenericImageView, ImageFormat, ImageReader};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::error::Error;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
@@ -310,7 +311,8 @@ fn get_last_n_iterations_with_screenshots(
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.path().is_dir())
         .collect();
-    dirs.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+
+    dirs.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
 
     // Take the last N iterations
     for entry in dirs.iter().take(n) {
@@ -641,7 +643,7 @@ fn retry_action(
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn Error>> {
     dotenvy::dotenv().ok();
 
     let api_base =
@@ -743,49 +745,51 @@ async fn main() {
 
         let start = Instant::now();
         // let monitors = Monitor::all().unwrap();
-        let monitors = screens.get_monitors();
+        // let monitors = screens.get_monitors();
 
-        screens.report();
+        // screens.report();
 
-        // Create timestamp for this iteration
+        // // Create timestamp for this iteration
         let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
         let iteration_dir = format!("target/iterations/{}", timestamp);
         fs::create_dir_all(&iteration_dir).unwrap();
 
-        dir::create_all("target/monitors", true).unwrap();
+        // // dir::create_all("target/monitors", true).unwrap();
 
-        let monitor = monitors.first().unwrap();
-        let image = monitor.capture_image().unwrap();
+        // let monitor = monitors.first().unwrap();
+        // let image = monitor.capture_image().unwrap();
 
-        let image_file_name = format!("{}/screenshot.png", iteration_dir);
-        image.save(&image_file_name).unwrap();
-
-        println!("capture time: {:?}", start.elapsed());
+        // let image_file_name = format!("{}/screenshot.png", iteration_dir);
+        // image.save(&image_file_name).unwrap();
 
         // ---
 
-        let start = Instant::now();
+        // let start = Instant::now();
 
-        let img = ImageReader::open(&image_file_name).unwrap();
+        // let img = ImageReader::open(&image_file_name).unwrap();
 
-        let img = img.decode().unwrap();
+        // let img = img.decode().unwrap();
 
-        let (w, h) = img.dimensions();
-        let img = img.resize(w / 3, h / 3, FilterType::CatmullRom);
+        // let (w, h) = img.dimensions();
+        // let img = img.resize(w / 3, h / 3, FilterType::CatmullRom);
 
-        let resized_image_file_name = format!("{}/screenshot_resized.png", iteration_dir);
-        img.save(&resized_image_file_name).unwrap();
+        // let resized_image_file_name = format!("{}/screenshot_resized.png", iteration_dir);
+        // img.save(&resized_image_file_name).unwrap();
 
-        // Create a buffer to store the image data
-        let mut buf = Vec::new();
-        let mut cursor = std::io::Cursor::new(&mut buf);
-        img.write_to(&mut cursor, ImageFormat::Png).unwrap();
+        // // Create a buffer to store the image data
+        // let mut buf = Vec::new();
+        // let mut cursor = std::io::Cursor::new(&mut buf);
+        // img.write_to(&mut cursor, ImageFormat::Png).unwrap();
 
-        // Encode the image data to base64
-        let res_base64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+        // // Encode the image data to base64
+        // let res_base64 = base64::engine::general_purpose::STANDARD.encode(&buf);
 
-        println!("encode time: {:?}", start.elapsed());
+        // println!("encode time: {:?}", start.elapsed());
 
+        let base64_images = screens.capture_and_save_all_with_base64(&iteration_dir, 3)?;
+        let res_base64 = base64_images.first().unwrap();
+
+        println!("capture and encode time: {:?}", start.elapsed());
         // ---
 
         let start = Instant::now();
@@ -1405,4 +1409,6 @@ Example valid response:
 
     // Wait for the input thread to finish
     input_handle.join().unwrap();
+
+    Ok(())
 }
