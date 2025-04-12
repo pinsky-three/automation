@@ -1,3 +1,5 @@
+mod actuators;
+
 use async_openai::Client;
 use async_openai::config::OpenAIConfig;
 use async_openai::types::{
@@ -21,6 +23,8 @@ use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::{thread::sleep, time::Duration};
 use xcap::Monitor;
+// Import our custom keyboard
+use crate::actuators::keyboard::Keyboard as CustomKeyboard;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct TaskState {
@@ -466,8 +470,7 @@ fn verify_action(
     // Verify based on action type
     match action["action"].as_str() {
         Some("window_focus") => {
-            if let (Some(title), Some(class)) = (action["title"].as_str(), action["class"].as_str())
-            {
+            if let Some(title) = action["title"].as_str() {
                 if let Some(active_window) = state["active_window"].as_str() {
                     if active_window.to_lowercase().contains(&title.to_lowercase()) {
                         result = result.success();
@@ -554,20 +557,14 @@ fn retry_action(
                     if let (Some(title), Some(class)) =
                         (action["title"].as_str(), action["class"].as_str())
                     {
+                        // Create a keyboard handler and use it
+                        let mut keyboard = crate::actuators::keyboard::Keyboard::new(enigo);
                         match new_method {
                             "alt_tab" => {
-                                enigo.key(Key::Alt, Direction::Press).unwrap();
-                                sleep(Duration::from_millis(100));
-                                enigo.key(Key::Tab, Direction::Click).unwrap();
-                                sleep(Duration::from_millis(100));
-                                enigo.key(Key::Alt, Direction::Release).unwrap();
+                                let _ = keyboard.alt_tab();
                             }
                             "super_tab" => {
-                                enigo.key(Key::Meta, Direction::Press).unwrap();
-                                sleep(Duration::from_millis(100));
-                                enigo.key(Key::Tab, Direction::Click).unwrap();
-                                sleep(Duration::from_millis(100));
-                                enigo.key(Key::Meta, Direction::Release).unwrap();
+                                let _ = keyboard.cmd_tab();
                             }
                             _ => {}
                         }
@@ -912,11 +909,11 @@ IMPORTANT:
 6. Always include window_title and window_class for proper window management
 7. Set target_window to the window that needs to be focused for the task (e.g., \"Chrome\" for web tasks)
 8. ONLY analyze the CURRENT screenshot, not the historical ones", 
-                    history_text,
-                    state_context,
-                    history = history_text,
-                    width = screen_width,
-                    height = screen_height))
+                history_text,
+                state_context,
+                history = history_text,
+                width = screen_width,
+                height = screen_height))
                 .build()
                 .unwrap()
                 .into()
@@ -1121,104 +1118,50 @@ Example valid response:
                 // Execute the action and verify it
                 let action_result = match action["action"].as_str() {
                     Some("window_focus") => {
+                        let mut result;
                         if let (Some(title), Some(class), Some(method)) = (
                             action["title"].as_str(),
                             action["class"].as_str(),
                             action["method"].as_str(),
                         ) {
                             println!("Focusing window: {} ({}) using {}", title, class, method);
-                            match method {
-                                "alt_tab" => {
-                                    enigo.key(Key::Alt, Direction::Press).unwrap();
-                                    sleep(Duration::from_millis(100));
-                                    enigo.key(Key::Tab, Direction::Click).unwrap();
-                                    sleep(Duration::from_millis(100));
-                                    enigo.key(Key::Alt, Direction::Release).unwrap();
+
+                            // Use our custom keyboard module
+                            let mut keyboard = CustomKeyboard::new(&mut enigo);
+                            let key_result = match method {
+                                "alt_tab" => keyboard.alt_tab(),
+                                "super_tab" => keyboard.cmd_tab(),
+                                _ => {
+                                    println!("Unknown window focus method: {}", method);
+                                    Err(format!("Unknown window focus method: {}", method))
                                 }
-                                "super_tab" => {
-                                    enigo.key(Key::Meta, Direction::Press).unwrap();
-                                    sleep(Duration::from_millis(100));
-                                    enigo.key(Key::Tab, Direction::Click).unwrap();
-                                    sleep(Duration::from_millis(100));
-                                    enigo.key(Key::Meta, Direction::Release).unwrap();
-                                }
-                                _ => println!("Unknown window focus method: {}", method),
-                            }
+                            };
 
-                            // Wait a bit for the window to focus
-                            sleep(Duration::from_millis(500));
-
-                            // Capture a new screenshot to verify the action
-                            let monitors = Monitor::all().unwrap();
-                            let monitor = monitors.first().unwrap();
-                            let image = monitor.capture_image().unwrap();
-                            let verify_image_path =
-                                format!("{}/verify_screenshot.png", iteration_dir);
-                            image.save(&verify_image_path).unwrap();
-
-                            // Analyze the new screenshot
-                            let verify_analysis_request = CreateChatCompletionRequestArgs::default()
-                                .model(&model_name)
-                                .max_tokens(max_tokens)
-                                .messages([ChatCompletionRequestUserMessageArgs::default()
-                                    .content(vec![
-                                        ChatCompletionRequestMessageContentPartTextArgs::default()
-                                            .text("Analyze this screenshot and provide a STRICT JSON response with the same format as before.")
-                                            .build()
-                                            .unwrap()
-                                            .into(),
-                                        ChatCompletionRequestMessageContentPartImageArgs::default()
-                                            .image_url(
-                                                ImageUrlArgs::default()
-                                                    .url(format!("data:image/png;base64,{}", 
-                                                        base64::engine::general_purpose::STANDARD.encode(
-                                                            fs::read(&verify_image_path).unwrap()
-                                                        )))
-                                                    .detail(ImageDetail::High)
-                                                    .build()
-                                                    .unwrap(),
-                                            )
-                                            .build()
-                                            .unwrap()
-                                            .into(),
-                                    ])
-                                    .build()
-                                    .unwrap()
-                                    .into()])
-                                .build()
-                                .unwrap();
-
-                            let verify_analysis_response =
-                                client.chat().create(verify_analysis_request).await.unwrap();
-                            let mut verify_analysis_json = String::new();
-                            for choice in verify_analysis_response.choices {
-                                verify_analysis_json = choice.message.content.unwrap_or_default();
-                            }
-
-                            // Clean up and validate the verification analysis JSON
-                            let clean_verify_analysis = verify_analysis_json
-                                .trim()
-                                .trim_start_matches("```json")
-                                .trim_start_matches("```")
-                                .trim_end_matches("```")
-                                .trim();
-
-                            // Parse the verification analysis JSON
-                            if let Ok(verify_json) =
-                                serde_json::from_str::<serde_json::Value>(&clean_verify_analysis)
-                            {
-                                // Verify the action
-                                retry_action(&action, &verify_json, &mut task_state, &mut enigo)
+                            // Check if the operation was successful
+                            if let Err(err) = key_result {
+                                println!("Error focusing window: {}", err);
+                                result = ActionResult::new("window_focus").with_error(&err);
                             } else {
-                                println!("Error: Could not parse verification analysis JSON");
-                                ActionResult::new("window_focus").with_error("Verification failed")
+                                // Wait a bit for the window to focus
+                                sleep(Duration::from_millis(500));
+
+                                // Verify the action
+                                result = retry_action(
+                                    &action,
+                                    &analysis_json,
+                                    &mut task_state,
+                                    &mut enigo,
+                                );
                             }
                         } else {
                             println!("Error: Missing parameters for window_focus action");
-                            ActionResult::new("window_focus").with_error("Missing parameters")
+                            result =
+                                ActionResult::new("window_focus").with_error("Missing parameters");
                         }
+                        result
                     }
                     Some("mouse_move") => {
+                        let mut result;
                         if let (Some(x), Some(y)) = (action["x"].as_i64(), action["y"].as_i64()) {
                             println!("Moving mouse to ({}, {})", x, y);
                             enigo
@@ -1226,13 +1169,17 @@ Example valid response:
                                 .unwrap();
 
                             // Verify the action
-                            retry_action(&action, &analysis_json, &mut task_state, &mut enigo)
+                            result =
+                                retry_action(&action, &analysis_json, &mut task_state, &mut enigo);
                         } else {
                             println!("Error: Missing coordinates for mouse_move action");
-                            ActionResult::new("mouse_move").with_error("Missing coordinates")
+                            result =
+                                ActionResult::new("mouse_move").with_error("Missing coordinates");
                         }
+                        result
                     }
                     Some("mouse_click") => {
+                        let mut result;
                         if let Some(button) = action["button"].as_str() {
                             println!("Clicking {} mouse button", button);
                             match button {
@@ -1243,32 +1190,44 @@ Example valid response:
                             }
 
                             // Verify the action
-                            retry_action(&action, &analysis_json, &mut task_state, &mut enigo)
+                            result =
+                                retry_action(&action, &analysis_json, &mut task_state, &mut enigo);
                         } else {
                             println!("Error: Missing button for mouse_click action");
-                            ActionResult::new("mouse_click").with_error("Missing button")
+                            result = ActionResult::new("mouse_click").with_error("Missing button");
                         }
+                        result
                     }
                     Some("key_press") => {
+                        let mut result;
                         if let Some(key) = action["key"].as_str() {
                             println!("Pressing key: {}", key);
-                            match key.to_lowercase().as_str() {
-                                "return" | "enter" => {
-                                    enigo.key(Key::Return, Direction::Click).unwrap()
-                                }
-                                "tab" => enigo.key(Key::Tab, Direction::Click).unwrap(),
-                                "escape" => enigo.key(Key::Escape, Direction::Click).unwrap(),
-                                _ => println!("Unknown key: {}", key),
-                            }
 
-                            // Verify the action
-                            retry_action(&action, &analysis_json, &mut task_state, &mut enigo)
+                            // Use our custom keyboard module
+                            let mut keyboard = CustomKeyboard::new(&mut enigo);
+                            match keyboard.press_key(key) {
+                                Ok(_) => {
+                                    // Verify the action
+                                    result = retry_action(
+                                        &action,
+                                        &analysis_json,
+                                        &mut task_state,
+                                        &mut enigo,
+                                    );
+                                }
+                                Err(err) => {
+                                    println!("Error pressing key: {}", err);
+                                    result = ActionResult::new("key_press").with_error(&err);
+                                }
+                            }
                         } else {
                             println!("Error: Missing key for key_press action");
-                            ActionResult::new("key_press").with_error("Missing key")
+                            result = ActionResult::new("key_press").with_error("Missing key");
                         }
+                        result
                     }
                     Some("key_combination") => {
+                        let mut result;
                         if let Some(keys) = action["keys"].as_array() {
                             let key_names: Vec<String> = keys
                                 .iter()
@@ -1277,97 +1236,74 @@ Example valid response:
                                 .collect();
                             println!("Pressing key combination: {:?}", key_names);
 
-                            // Press all modifier keys first
-                            for key in &key_names {
-                                match key.as_str() {
-                                    "control" | "ctrl" => {
-                                        enigo.key(Key::Control, Direction::Press).unwrap();
-                                    }
-                                    "alt" => {
-                                        enigo.key(Key::Alt, Direction::Press).unwrap();
-                                    }
-                                    "shift" => {
-                                        enigo.key(Key::Shift, Direction::Press).unwrap();
-                                    }
-                                    "meta" | "super" | "windows" => {
-                                        enigo.key(Key::Meta, Direction::Press).unwrap();
-                                    }
-                                    _ => {}
+                            // Use our custom keyboard module
+                            let mut keyboard = CustomKeyboard::new(&mut enigo);
+                            match keyboard.press_key_combination(&key_names) {
+                                Ok(_) => {
+                                    // Verify the action
+                                    result = retry_action(
+                                        &action,
+                                        &analysis_json,
+                                        &mut task_state,
+                                        &mut enigo,
+                                    );
+                                }
+                                Err(err) => {
+                                    println!("Error pressing key combination: {}", err);
+                                    result = ActionResult::new("key_combination").with_error(&err);
                                 }
                             }
-
-                            // Small delay to ensure modifier keys are registered
-                            sleep(Duration::from_millis(50));
-
-                            // Press the last key (non-modifier)
-                            if let Some(last_key) = key_names.last() {
-                                match last_key.as_str() {
-                                    "t" => enigo.text("t").unwrap(),
-                                    "w" => enigo.text("w").unwrap(),
-                                    "r" => enigo.text("r").unwrap(),
-                                    "l" => enigo.text("l").unwrap(),
-                                    "a" => enigo.text("a").unwrap(),
-                                    "c" => enigo.text("c").unwrap(),
-                                    "v" => enigo.text("v").unwrap(),
-                                    "x" => enigo.text("x").unwrap(),
-                                    "z" => enigo.text("z").unwrap(),
-                                    _ => println!("Unknown key in combination: {}", last_key),
-                                }
-                            }
-
-                            // Small delay to ensure the key combination is registered
-                            sleep(Duration::from_millis(50));
-
-                            for key in &key_names {
-                                match key.as_str() {
-                                    "control" | "ctrl" => {
-                                        enigo.key(Key::Control, Direction::Release).unwrap();
-                                    }
-                                    "alt" => {
-                                        enigo.key(Key::Alt, Direction::Release).unwrap();
-                                    }
-                                    "shift" => {
-                                        enigo.key(Key::Shift, Direction::Release).unwrap();
-                                    }
-                                    "meta" | "super" | "windows" => {
-                                        enigo.key(Key::Meta, Direction::Release).unwrap();
-                                    }
-                                    _ => {}
-                                }
-                            }
-
-                            // Verify the action
-                            retry_action(&action, &analysis_json, &mut task_state, &mut enigo)
                         } else {
                             println!("Error: Missing keys for key_combination action");
-                            ActionResult::new("key_combination").with_error("Missing keys")
+                            result =
+                                ActionResult::new("key_combination").with_error("Missing keys");
                         }
+                        result
                     }
                     Some("text_input") => {
+                        let mut result;
                         if let Some(text) = action["text"].as_str() {
                             println!("Typing text: {}", text);
-                            enigo.text(text).unwrap();
 
-                            // Verify the action
-                            retry_action(&action, &analysis_json, &mut task_state, &mut enigo)
+                            // Use our custom keyboard module
+                            let mut keyboard = CustomKeyboard::new(&mut enigo);
+                            match keyboard.type_text(text) {
+                                Ok(_) => {
+                                    // Verify the action
+                                    result = retry_action(
+                                        &action,
+                                        &analysis_json,
+                                        &mut task_state,
+                                        &mut enigo,
+                                    );
+                                }
+                                Err(err) => {
+                                    println!("Error typing text: {}", err);
+                                    result = ActionResult::new("text_input").with_error(&err);
+                                }
+                            }
                         } else {
                             println!("Error: Missing text for text_input action");
-                            ActionResult::new("text_input").with_error("Missing text")
+                            result = ActionResult::new("text_input").with_error("Missing text");
                         }
+                        result
                     }
                     Some("wait") => {
+                        let result;
                         if let Some(ms) = action["ms"].as_i64() {
                             println!("Waiting for {}ms", ms);
                             sleep(Duration::from_millis(ms as u64));
 
                             // Wait actions always succeed
-                            ActionResult::new("wait").success()
+                            result = ActionResult::new("wait").success();
                         } else {
                             println!("Error: Missing ms for wait action");
-                            ActionResult::new("wait").with_error("Missing ms")
+                            result = ActionResult::new("wait").with_error("Missing ms");
                         }
+                        result
                     }
                     Some("task_done") => {
+                        let result;
                         if let Some(reason) = action["reason"].as_str() {
                             println!("Task done. Reason: {}", reason);
                             task_state.set_task_done();
@@ -1375,11 +1311,12 @@ Example valid response:
                             *is_idle.lock().unwrap() = true;
 
                             // Task done actions always succeed
-                            ActionResult::new("task_done").success()
+                            result = ActionResult::new("task_done").success();
                         } else {
                             println!("Error: Missing reason for task_done action");
-                            ActionResult::new("task_done").with_error("Missing reason")
+                            result = ActionResult::new("task_done").with_error("Missing reason");
                         }
+                        result
                     }
                     _ => {
                         println!("Unknown action: {:?}", action["action"]);
@@ -1393,6 +1330,7 @@ Example valid response:
 
                     // If we've retried too many times, pause the task
                     if action_result.retry_count >= 3 {
+                        // Too many retries for action. Pausing task.
                         println!(
                             "Too many retries for action: {}. Pausing task.",
                             action_result.action_type
