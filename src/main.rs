@@ -7,6 +7,7 @@ use async_openai::types::{
     ChatCompletionRequestMessageContentPartTextArgs, ChatCompletionRequestUserMessageArgs,
     CreateChatCompletionRequestArgs, ImageDetail, ImageUrlArgs,
 };
+use automation::senses::screens::Screens;
 use base64::Engine;
 use chrono::Local;
 use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
@@ -25,6 +26,7 @@ use std::{thread::sleep, time::Duration};
 use xcap::Monitor;
 // Import our custom keyboard
 use crate::actuators::keyboard::Keyboard as CustomKeyboard;
+use crate::actuators::mouse::Mouse as CustomMouse;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct TaskState {
@@ -371,6 +373,7 @@ async fn generate_self_instruction(
     history: &[(String, String, String, Option<String>)],
     current_instruction: &str,
     task_state: &TaskState,
+    max_tokens: u32,
 ) -> String {
     if history.is_empty() {
         return current_instruction.to_string();
@@ -390,7 +393,7 @@ async fn generate_self_instruction(
 
     let self_instruction_request = CreateChatCompletionRequestArgs::default()
         .model(model_name)
-        .max_tokens(256_u32)
+        .max_tokens(max_tokens)
         .messages([ChatCompletionRequestUserMessageArgs::default()
             .content(vec![
                 ChatCompletionRequestMessageContentPartTextArgs::default()
@@ -610,26 +613,14 @@ fn retry_action(
                         if let Some((new_x, new_y)) = closest_element {
                             println!("Adjusting mouse coordinates to ({}, {})", new_x, new_y);
 
-                            // Move to the new coordinates
-                            enigo
-                                .move_mouse(new_x as i32, new_y as i32, Coordinate::Abs)
-                                .unwrap();
+                            // Move to the new coordinates using our custom Mouse
+                            let mut mouse = CustomMouse::new(enigo);
+                            let _ = mouse.move_to(new_x as i32, new_y as i32);
 
                             // If this is a click action, click at the new coordinates
                             if action["action"].as_str() == Some("mouse_click") {
                                 if let Some(button) = action["button"].as_str() {
-                                    match button {
-                                        "left" => {
-                                            enigo.button(Button::Left, Direction::Click).unwrap()
-                                        }
-                                        "right" => {
-                                            enigo.button(Button::Right, Direction::Click).unwrap()
-                                        }
-                                        "middle" => {
-                                            enigo.button(Button::Middle, Direction::Click).unwrap()
-                                        }
-                                        _ => {}
-                                    }
+                                    let _ = mouse.click(button);
                                 }
                             }
                         }
@@ -661,6 +652,8 @@ async fn main() {
         .unwrap_or_else(|_| "512".to_string())
         .parse::<u32>()
         .unwrap_or(512);
+
+    println!("max_tokens: {}", max_tokens);
 
     let api_key = std::env::var("API_KEY").unwrap();
 
@@ -739,6 +732,8 @@ async fn main() {
         }
     });
 
+    let screens = Screens::new();
+
     while *should_continue.lock().unwrap() {
         // Check if we're in idle state
         if *is_idle.lock().unwrap() {
@@ -747,7 +742,10 @@ async fn main() {
         }
 
         let start = Instant::now();
-        let monitors = Monitor::all().unwrap();
+        // let monitors = Monitor::all().unwrap();
+        let monitors = screens.get_monitors();
+
+        screens.report();
 
         // Create timestamp for this iteration
         let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
@@ -956,7 +954,7 @@ IMPORTANT:
         // Stage 1: Analysis
         let analysis_request = CreateChatCompletionRequestArgs::default()
             .model(&model_name)
-            .max_tokens(max_tokens)
+            .max_tokens(1024_u32)
             .messages([ChatCompletionRequestUserMessageArgs::default()
                 .content(new_content_parts)
                 .build()
@@ -985,10 +983,58 @@ IMPORTANT:
         fs::write(&analysis_file_name, clean_analysis).unwrap();
 
         // Validate analysis JSON structure
-        if let Err(e) = serde_json::from_str::<serde_json::Value>(clean_analysis) {
-            println!("Error: Invalid analysis JSON format: {}", e);
-            continue;
-        }
+        let parsed_analysis = match serde_json::from_str::<serde_json::Value>(clean_analysis) {
+            Ok(json) => json,
+            Err(e) => {
+                println!("Error: Invalid analysis JSON format: {}", e);
+                println!("Attempting to fix truncated JSON...");
+
+                // Try to fix the most common case of truncated JSON by adding missing brackets/braces
+                let mut fixed_json = clean_analysis.to_string();
+
+                // Count opening and closing braces/brackets to detect imbalance
+                let open_braces = fixed_json.matches('{').count();
+                let close_braces = fixed_json.matches('}').count();
+                let open_brackets = fixed_json.matches('[').count();
+                let close_brackets = fixed_json.matches(']').count();
+
+                // Add missing closing braces/brackets
+                for _ in 0..(open_braces - close_braces) {
+                    fixed_json.push('}');
+                }
+
+                for _ in 0..(open_brackets - close_brackets) {
+                    fixed_json.push(']');
+                }
+
+                // Try parsing again with fixed JSON
+                match serde_json::from_str::<serde_json::Value>(&fixed_json) {
+                    Ok(json) => {
+                        println!("Successfully fixed truncated JSON");
+                        // Update the file with fixed JSON
+                        fs::write(&analysis_file_name, &fixed_json).unwrap();
+                        json
+                    }
+                    Err(e) => {
+                        println!("Could not fix JSON, continuing with partial data: {}", e);
+                        // Create a minimal valid JSON with error message
+                        serde_json::json!({
+                            "context": "error",
+                            "ui_elements": [],
+                            "state": {
+                                "focused_element": null,
+                                "selected_text": null,
+                                "active_window": "unknown",
+                                "window_title": "unknown",
+                                "window_class": "unknown",
+                                "target_window": null
+                            },
+                            "challenges": ["JSON parsing error, possible truncation"]
+                        })
+                    }
+                }
+            }
+        };
 
         // Stage 2: Action Planning
         let action_request = CreateChatCompletionRequestArgs::default()
@@ -1050,7 +1096,7 @@ Example valid response:
     {{ \"action\": \"text_input\", \"text\": \"google.com\" }},
     {{ \"action\": \"wait\", \"ms\": 200 }},
     {{ \"action\": \"key_press\", \"key\": \"return\" }}
-]", history_text, instruction, clean_analysis))
+]", history_text, instruction, serde_json::to_string_pretty(&parsed_analysis).unwrap_or_else(|_| clean_analysis.to_string())))
                         .build()
                         .unwrap()
                         .into()])
@@ -1087,6 +1133,7 @@ Example valid response:
                 &iterations_history,
                 &instruction,
                 &task_state,
+                max_tokens,
             )
             .await;
             println!("Generated new instruction: {}", new_instruction);
@@ -1105,15 +1152,6 @@ Example valid response:
                 if !*should_continue.lock().unwrap() {
                     break;
                 }
-
-                // Parse the analysis JSON for verification
-                let analysis_json =
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&clean_analysis) {
-                        json
-                    } else {
-                        println!("Error: Could not parse analysis JSON for verification");
-                        continue;
-                    };
 
                 // Execute the action and verify it
                 let action_result = match action["action"].as_str() {
@@ -1148,7 +1186,7 @@ Example valid response:
                                 // Verify the action
                                 result = retry_action(
                                     &action,
-                                    &analysis_json,
+                                    &parsed_analysis,
                                     &mut task_state,
                                     &mut enigo,
                                 );
@@ -1164,13 +1202,22 @@ Example valid response:
                         let mut result;
                         if let (Some(x), Some(y)) = (action["x"].as_i64(), action["y"].as_i64()) {
                             println!("Moving mouse to ({}, {})", x, y);
-                            enigo
-                                .move_mouse(x as i32, y as i32, Coordinate::Abs)
-                                .unwrap();
-
-                            // Verify the action
-                            result =
-                                retry_action(&action, &analysis_json, &mut task_state, &mut enigo);
+                            let mut mouse = CustomMouse::new(&mut enigo);
+                            match mouse.move_to(x as i32, y as i32) {
+                                Ok(_) => {
+                                    // Verify the action
+                                    result = retry_action(
+                                        &action,
+                                        &parsed_analysis,
+                                        &mut task_state,
+                                        &mut enigo,
+                                    );
+                                }
+                                Err(err) => {
+                                    println!("Error moving mouse: {}", err);
+                                    result = ActionResult::new("mouse_move").with_error(&err);
+                                }
+                            }
                         } else {
                             println!("Error: Missing coordinates for mouse_move action");
                             result =
@@ -1182,16 +1229,22 @@ Example valid response:
                         let mut result;
                         if let Some(button) = action["button"].as_str() {
                             println!("Clicking {} mouse button", button);
-                            match button {
-                                "left" => enigo.button(Button::Left, Direction::Click).unwrap(),
-                                "right" => enigo.button(Button::Right, Direction::Click).unwrap(),
-                                "middle" => enigo.button(Button::Middle, Direction::Click).unwrap(),
-                                _ => println!("Unknown button: {}", button),
+                            let mut mouse = CustomMouse::new(&mut enigo);
+                            match mouse.click(button) {
+                                Ok(_) => {
+                                    // Verify the action
+                                    result = retry_action(
+                                        &action,
+                                        &parsed_analysis,
+                                        &mut task_state,
+                                        &mut enigo,
+                                    );
+                                }
+                                Err(err) => {
+                                    println!("Error clicking mouse: {}", err);
+                                    result = ActionResult::new("mouse_click").with_error(&err);
+                                }
                             }
-
-                            // Verify the action
-                            result =
-                                retry_action(&action, &analysis_json, &mut task_state, &mut enigo);
                         } else {
                             println!("Error: Missing button for mouse_click action");
                             result = ActionResult::new("mouse_click").with_error("Missing button");
@@ -1210,7 +1263,7 @@ Example valid response:
                                     // Verify the action
                                     result = retry_action(
                                         &action,
-                                        &analysis_json,
+                                        &parsed_analysis,
                                         &mut task_state,
                                         &mut enigo,
                                     );
@@ -1243,7 +1296,7 @@ Example valid response:
                                     // Verify the action
                                     result = retry_action(
                                         &action,
-                                        &analysis_json,
+                                        &parsed_analysis,
                                         &mut task_state,
                                         &mut enigo,
                                     );
@@ -1272,7 +1325,7 @@ Example valid response:
                                     // Verify the action
                                     result = retry_action(
                                         &action,
-                                        &analysis_json,
+                                        &parsed_analysis,
                                         &mut task_state,
                                         &mut enigo,
                                     );

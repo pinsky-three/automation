@@ -1,1 +1,2 @@
-mod actuators;
+pub mod actuators;
+pub mod senses;
