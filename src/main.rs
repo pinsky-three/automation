@@ -3,12 +3,12 @@ mod actuators;
 use async_openai::Client;
 use async_openai::config::OpenAIConfig;
 use async_openai::types::{
-    ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-    ChatCompletionRequestMessageContentPartImageArgs, ChatCompletionRequestMessageContentPartText,
-    ChatCompletionRequestMessageContentPartTextArgs, ChatCompletionRequestSystemMessage,
-    ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-    ChatCompletionRequestUserMessageContentPart, CreateChatCompletionRequestArgs, ImageDetail,
-    ImageUrlArgs,
+    ChatCompletionRequestAssistantMessage, ChatCompletionRequestAssistantMessageArgs,
+    ChatCompletionRequestMessage, ChatCompletionRequestMessageContentPartImageArgs,
+    ChatCompletionRequestMessageContentPartText, ChatCompletionRequestMessageContentPartTextArgs,
+    ChatCompletionRequestSystemMessage, ChatCompletionRequestSystemMessageArgs,
+    ChatCompletionRequestUserMessageArgs, ChatCompletionRequestUserMessageContentPart,
+    CreateChatCompletionRequestArgs, ImageDetail, ImageUrlArgs,
 };
 use automation::senses::screens::Screens;
 use base64::Engine;
@@ -891,12 +891,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         struct HistoryMessage {
             state_message: String,
+            analysis_message: String,
             screens_message: Vec<String>,
             actions_message: String,
         }
 
-        let history_messages = vec![HistoryMessage {
+        let history_messages = [HistoryMessage {
             state_message: "".to_string(),
+            analysis_message: "".to_string(),
             screens_message: vec![],
             actions_message: "".to_string(),
         }];
@@ -1064,7 +1066,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let analysis_request = CreateChatCompletionRequestArgs::default()
             .model(&model_name)
             .max_tokens(max_tokens)
-            .messages(complete_chat_messages)
+            .messages(complete_chat_messages.clone())
             .build()
             .unwrap();
 
@@ -1141,73 +1143,76 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         };
 
+        let analysis_message = serde_json::to_string_pretty(&parsed_analysis)
+            .unwrap_or_else(|_| clean_analysis.to_string());
+
+        complete_chat_messages.push(ChatCompletionRequestMessage::Assistant(
+            ChatCompletionRequestAssistantMessageArgs::default()
+                .content(format!("STATE ANALYSIS: {}", analysis_message))
+                .build()
+                .unwrap(),
+        ));
+
+        complete_chat_messages.push(ChatCompletionRequestMessage::User(
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(format!("
+                Based on this context analysis and the instruction '{}', plan a sequence of actions. Your response must be a STRICT JSON array of actions.
+                Available Actions (use ONLY these exact formats):
+                1. Window Focus:
+                   {{ \"action\": \"window_focus\", \"title\": string, \"class\": string, \"method\": \"alt_tab\" | \"super_tab\" }}
+                
+                2. Mouse Movement:
+                   {{ \"action\": \"mouse_move\", \"x\": number, \"y\": number }}
+                
+                3. Mouse Click:
+                   {{ \"action\": \"mouse_click\", \"button\": \"left\" | \"right\" | \"middle\" }}
+                
+                4. Key Press:
+                   {{ \"action\": \"key_press\", \"key\": \"return\" | \"tab\" | \"escape\" }}
+                
+                5. Key Combination:
+                   {{ \"action\": \"key_combination\", \"keys\": [\"control\" | \"alt\" | \"shift\" | \"meta\", string] }}
+                
+                6. Text Input:
+                   {{ \"action\": \"text_input\", \"text\": string }}
+                
+                7. Wait:
+                   {{ \"action\": \"wait\", \"ms\": number }}
+                   
+                8. Task Done:
+                   {{ \"action\": \"task_done\", \"reason\": string }}
+                
+                Guidelines:
+                1. Response must be ONLY the JSON array, no additional text
+                2. Each action must follow the exact format shown above
+                3. Wait times should be between 100-1000ms
+                4. Mouse coordinates must be within screen bounds
+                5. Key combinations must include at least one modifier key
+                6. Do not include any explanations or comments in the JSON
+                7. ALWAYS start with window_focus action if the target window is not already active
+                8. Add a wait after window_focus to ensure the window is ready
+                9. Use super_tab for window switching if alt_tab doesn't work
+                10. Verify window focus before proceeding with actions
+                
+                Example valid response:
+                [
+                    {{ \"action\": \"window_focus\", \"title\": \"Google Chrome\", \"class\": \"chrome\", \"method\": \"super_tab\" }},
+                    {{ \"action\": \"wait\", \"ms\": 500 }},
+                    {{ \"action\": \"key_combination\", \"keys\": [\"control\", \"t\"] }},
+                    {{ \"action\": \"wait\", \"ms\": 500 }},
+                    {{ \"action\": \"text_input\", \"text\": \"google.com\" }},
+                    {{ \"action\": \"wait\", \"ms\": 200 }},
+                    {{ \"action\": \"key_press\", \"key\": \"return\" }}
+                ]", instruction))
+                .build()
+                .unwrap(),
+        ));
+
         // Stage 2: Action Planning
         let action_request = CreateChatCompletionRequestArgs::default()
             .model(&model_name)
             .max_tokens(max_tokens)
-            .messages([ChatCompletionRequestUserMessageArgs::default()
-                .content(vec![
-                    ChatCompletionRequestMessageContentPartTextArgs::default()
-                        .text(format!("
-
-Based on this context analysis and the instruction '{}', plan a sequence of actions. Your response must be a STRICT JSON array of actions.
-
-Context Analysis:
-{}
-
-Available Actions (use ONLY these exact formats):
-1. Window Focus:
-   {{ \"action\": \"window_focus\", \"title\": string, \"class\": string, \"method\": \"alt_tab\" | \"super_tab\" }}
-
-2. Mouse Movement:
-   {{ \"action\": \"mouse_move\", \"x\": number, \"y\": number }}
-
-3. Mouse Click:
-   {{ \"action\": \"mouse_click\", \"button\": \"left\" | \"right\" | \"middle\" }}
-
-4. Key Press:
-   {{ \"action\": \"key_press\", \"key\": \"return\" | \"tab\" | \"escape\" }}
-
-5. Key Combination:
-   {{ \"action\": \"key_combination\", \"keys\": [\"control\" | \"alt\" | \"shift\" | \"meta\", string] }}
-
-6. Text Input:
-   {{ \"action\": \"text_input\", \"text\": string }}
-
-7. Wait:
-   {{ \"action\": \"wait\", \"ms\": number }}
-   
-8. Task Done:
-   {{ \"action\": \"task_done\", \"reason\": string }}
-
-Guidelines:
-1. Response must be ONLY the JSON array, no additional text
-2. Each action must follow the exact format shown above
-3. Wait times should be between 100-1000ms
-4. Mouse coordinates must be within screen bounds
-5. Key combinations must include at least one modifier key
-6. Do not include any explanations or comments in the JSON
-7. ALWAYS start with window_focus action if the target window is not already active
-8. Add a wait after window_focus to ensure the window is ready
-9. Use super_tab for window switching if alt_tab doesn't work
-10. Verify window focus before proceeding with actions
-
-Example valid response:
-[
-    {{ \"action\": \"window_focus\", \"title\": \"Google Chrome\", \"class\": \"chrome\", \"method\": \"super_tab\" }},
-    {{ \"action\": \"wait\", \"ms\": 500 }},
-    {{ \"action\": \"key_combination\", \"keys\": [\"control\", \"t\"] }},
-    {{ \"action\": \"wait\", \"ms\": 500 }},
-    {{ \"action\": \"text_input\", \"text\": \"google.com\" }},
-    {{ \"action\": \"wait\", \"ms\": 200 }},
-    {{ \"action\": \"key_press\", \"key\": \"return\" }}
-]", instruction, serde_json::to_string_pretty(&parsed_analysis).unwrap_or_else(|_| clean_analysis.to_string())))
-                        .build()
-                        .unwrap()
-                        .into()])
-                .build()
-                .unwrap()
-                .into()])
+            .messages(complete_chat_messages)
             .build()
             .unwrap();
 
