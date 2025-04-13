@@ -44,6 +44,10 @@ impl<'a> Keyboard<'a> {
                     EnigoKeyboard::key(self.enigo, Key::Control, Direction::Press)
                         .map_err(|e| e.to_string())?;
                 }
+                "cmd" => {
+                    EnigoKeyboard::key(self.enigo, Key::Meta, Direction::Press)
+                        .map_err(|e| e.to_string())?;
+                }
                 "alt" => {
                     EnigoKeyboard::key(self.enigo, Key::Alt, Direction::Press)
                         .map_err(|e| e.to_string())?;
@@ -87,6 +91,10 @@ impl<'a> Keyboard<'a> {
             match key.to_lowercase().as_str() {
                 "control" | "ctrl" => {
                     EnigoKeyboard::key(self.enigo, Key::Control, Direction::Release)
+                        .map_err(|e| e.to_string())?;
+                }
+                "cmd" => {
+                    EnigoKeyboard::key(self.enigo, Key::Meta, Direction::Release)
                         .map_err(|e| e.to_string())?;
                 }
                 "alt" => {

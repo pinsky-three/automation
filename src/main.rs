@@ -20,14 +20,14 @@ use image::{GenericImageView, ImageFormat, ImageReader};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
-use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{env, fs};
 use std::{thread::sleep, time::Duration};
-use xcap::Monitor;
+
 // Import our custom keyboard
 use crate::actuators::keyboard::Keyboard as CustomKeyboard;
 use crate::actuators::mouse::Mouse as CustomMouse;
@@ -240,138 +240,138 @@ fn save_task_state(iteration_dir: &str, state: &TaskState) {
 }
 
 // Function to get the last N iterations
-fn get_last_n_iterations(n: usize) -> Vec<(String, String, String)> {
-    let iterations_dir = Path::new("target/iterations");
-    if !iterations_dir.exists() {
-        return Vec::new();
-    }
+// fn get_last_n_iterations(n: usize) -> Vec<(String, String, String)> {
+//     let iterations_dir = Path::new("target/iterations");
+//     if !iterations_dir.exists() {
+//         return Vec::new();
+//     }
 
-    let mut iterations: Vec<(String, String, String)> = Vec::new();
+//     let mut iterations: Vec<(String, String, String)> = Vec::new();
 
-    // Get all iteration directories and sort them by name (timestamp) in descending order
-    let mut dirs: Vec<_> = fs::read_dir(iterations_dir)
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().is_dir())
-        .collect();
-    dirs.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+//     // Get all iteration directories and sort them by name (timestamp) in descending order
+//     let mut dirs: Vec<_> = fs::read_dir(iterations_dir)
+//         .unwrap()
+//         .filter_map(|entry| entry.ok())
+//         .filter(|entry| entry.path().is_dir())
+//         .collect();
+//     dirs.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
 
-    // Take the last N iterations
-    for entry in dirs.iter().take(n) {
-        let dir_path = entry.path();
-        let metadata_path = dir_path.join("metadata.json");
-        let analysis_path = dir_path.join("analysis.json");
-        let actions_path = dir_path.join("actions.json");
+//     // Take the last N iterations
+//     for entry in dirs.iter().take(n) {
+//         let dir_path = entry.path();
+//         let metadata_path = dir_path.join("metadata.json");
+//         let analysis_path = dir_path.join("analysis.json");
+//         let actions_path = dir_path.join("actions.json");
 
-        if metadata_path.exists() && analysis_path.exists() && actions_path.exists() {
-            if let (Ok(metadata), Ok(analysis), Ok(actions)) = (
-                fs::read_to_string(&metadata_path),
-                fs::read_to_string(&analysis_path),
-                fs::read_to_string(&actions_path),
-            ) {
-                iterations.push((metadata, analysis, actions));
-            }
-        }
-    }
+//         if metadata_path.exists() && analysis_path.exists() && actions_path.exists() {
+//             if let (Ok(metadata), Ok(analysis), Ok(actions)) = (
+//                 fs::read_to_string(&metadata_path),
+//                 fs::read_to_string(&analysis_path),
+//                 fs::read_to_string(&actions_path),
+//             ) {
+//                 iterations.push((metadata, analysis, actions));
+//             }
+//         }
+//     }
 
-    iterations
-}
+//     iterations
+// }
 
-// Function to get screenshot from iteration directory
-fn get_screenshot_from_iteration(dir_path: &Path) -> Option<String> {
-    let screenshot_path = dir_path.join("screenshot_resized.png");
-    if screenshot_path.exists() {
-        if let Ok(img) = ImageReader::open(&screenshot_path) {
-            if let Ok(img) = img.decode() {
-                let (w, h) = img.dimensions();
-                let img = img.resize(w / 3, h / 3, FilterType::CatmullRom);
+// // Function to get screenshot from iteration directory
+// fn get_screenshot_from_iteration(dir_path: &Path) -> Option<String> {
+//     let screenshot_path = dir_path.join("screenshot_resized.png");
+//     if screenshot_path.exists() {
+//         if let Ok(img) = ImageReader::open(&screenshot_path) {
+//             if let Ok(img) = img.decode() {
+//                 let (w, h) = img.dimensions();
+//                 let img = img.resize(w / 3, h / 3, FilterType::CatmullRom);
 
-                // Create a buffer to store the image data
-                let mut buf = Vec::new();
-                let mut cursor = std::io::Cursor::new(&mut buf);
-                if img.write_to(&mut cursor, ImageFormat::Png).is_ok() {
-                    // Encode the image data to base64
-                    return Some(base64::engine::general_purpose::STANDARD.encode(&buf));
-                }
-            }
-        }
-    }
-    None
-}
+//                 // Create a buffer to store the image data
+//                 let mut buf = Vec::new();
+//                 let mut cursor = std::io::Cursor::new(&mut buf);
+//                 if img.write_to(&mut cursor, ImageFormat::Png).is_ok() {
+//                     // Encode the image data to base64
+//                     return Some(base64::engine::general_purpose::STANDARD.encode(&buf));
+//                 }
+//             }
+//         }
+//     }
+//     None
+// }
 
 // Function to get the last N iterations with screenshots
-fn get_last_n_iterations_with_screenshots(
-    n: usize,
-) -> Vec<(String, String, String, Option<String>)> {
-    let iterations_dir = Path::new("target/iterations");
-    if !iterations_dir.exists() {
-        return Vec::new();
-    }
+// fn get_last_n_iterations_with_screenshots(
+//     n: usize,
+// ) -> Vec<(String, String, String, Option<String>)> {
+//     let iterations_dir = Path::new("target/iterations");
+//     if !iterations_dir.exists() {
+//         return Vec::new();
+//     }
 
-    let mut iterations: Vec<(String, String, String, Option<String>)> = Vec::new();
+//     let mut iterations: Vec<(String, String, String, Option<String>)> = Vec::new();
 
-    // Get all iteration directories and sort them by name (timestamp) in descending order
-    let mut dirs: Vec<_> = fs::read_dir(iterations_dir)
-        .unwrap()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.path().is_dir())
-        .collect();
+//     // Get all iteration directories and sort them by name (timestamp) in descending order
+//     let mut dirs: Vec<_> = fs::read_dir(iterations_dir)
+//         .unwrap()
+//         .filter_map(|entry| entry.ok())
+//         .filter(|entry| entry.path().is_dir())
+//         .collect();
 
-    dirs.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+//     dirs.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
 
-    // Take the last N iterations
-    for entry in dirs.iter().take(n) {
-        let dir_path = entry.path();
-        let metadata_path = dir_path.join("metadata.json");
-        let analysis_path = dir_path.join("analysis.json");
-        let actions_path = dir_path.join("actions.json");
+//     // Take the last N iterations
+//     for entry in dirs.iter().take(n) {
+//         let dir_path = entry.path();
+//         let metadata_path = dir_path.join("metadata.json");
+//         let analysis_path = dir_path.join("analysis.json");
+//         let actions_path = dir_path.join("actions.json");
 
-        if metadata_path.exists() && analysis_path.exists() && actions_path.exists() {
-            if let (Ok(metadata), Ok(analysis), Ok(actions)) = (
-                fs::read_to_string(&metadata_path),
-                fs::read_to_string(&analysis_path),
-                fs::read_to_string(&actions_path),
-            ) {
-                let screenshot = get_screenshot_from_iteration(&dir_path);
-                iterations.push((metadata, analysis, actions, screenshot));
-            }
-        }
-    }
+//         if metadata_path.exists() && analysis_path.exists() && actions_path.exists() {
+//             if let (Ok(metadata), Ok(analysis), Ok(actions)) = (
+//                 fs::read_to_string(&metadata_path),
+//                 fs::read_to_string(&analysis_path),
+//                 fs::read_to_string(&actions_path),
+//             ) {
+//                 let screenshot = get_screenshot_from_iteration(&dir_path);
+//                 iterations.push((metadata, analysis, actions, screenshot));
+//             }
+//         }
+//     }
 
-    iterations
-}
+//     iterations
+// }
 
 // Function to format iterations history for the prompt
-fn format_iterations_history(iterations: &[(String, String, String, Option<String>)]) -> String {
-    if iterations.is_empty() {
-        return String::from("No previous iterations available.");
-    }
+// fn format_iterations_history(iterations: &[(String, String, String, Option<String>)]) -> String {
+//     if iterations.is_empty() {
+//         return String::from("No previous iterations available.");
+//     }
 
-    let mut history = String::from("Previous iterations:\n\n");
+//     let mut history = String::from("Previous iterations:\n\n");
 
-    for (metadata, analysis, actions, _) in iterations {
-        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(metadata) {
-            if let (Some(timestamp), Some(instruction), Some(status)) = (
-                meta["timestamp"].as_str(),
-                meta["instruction"].as_str(),
-                meta["status"].as_str(),
-            ) {
-                history.push_str(&format!("Iteration {}:\n", timestamp));
-                history.push_str(&format!("Instruction: {}\n", instruction));
-                history.push_str(&format!("Status: {}\n", status));
-                if let Some(feedback) = meta["feedback"].as_str() {
-                    history.push_str(&format!("Feedback: {}\n", feedback));
-                }
-                history.push_str("Analysis:\n");
-                history.push_str(&format!("{}\n", analysis));
-                history.push_str("Actions:\n");
-                history.push_str(&format!("{}\n\n", actions));
-            }
-        }
-    }
+//     for (metadata, analysis, actions, _) in iterations {
+//         if let Ok(meta) = serde_json::from_str::<serde_json::Value>(metadata) {
+//             if let (Some(timestamp), Some(instruction), Some(status)) = (
+//                 meta["timestamp"].as_str(),
+//                 meta["instruction"].as_str(),
+//                 meta["status"].as_str(),
+//             ) {
+//                 history.push_str(&format!("Iteration {}:\n", timestamp));
+//                 history.push_str(&format!("Instruction: {}\n", instruction));
+//                 history.push_str(&format!("Status: {}\n", status));
+//                 if let Some(feedback) = meta["feedback"].as_str() {
+//                     history.push_str(&format!("Feedback: {}\n", feedback));
+//                 }
+//                 history.push_str("Analysis:\n");
+//                 history.push_str(&format!("{}\n", analysis));
+//                 history.push_str("Actions:\n");
+//                 history.push_str(&format!("{}\n\n", actions));
+//             }
+//         }
+//     }
 
-    history
-}
+//     history
+// }
 
 // Function to generate self-instruction based on history
 async fn generate_self_instruction(
@@ -644,21 +644,6 @@ fn retry_action(
     result
 }
 
-struct Conversation {
-    messages: Vec<Message>,
-}
-
-struct Message {
-    role: String,
-    content: String,
-}
-
-fn load_conversation_history(n: usize) -> Conversation {
-    let conversation = Conversation { messages: vec![] };
-
-    conversation
-}
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     dotenvy::dotenv().ok();
@@ -867,11 +852,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // Add task state to the prompt
         let state_context = format!(
             "\nTASK STATE:
+        - Instruction: {}
         - Status: {}
         - Attempts: {}
         - Last Action: {}
         - Memory: {:?}
         - Feedback: {:?}",
+            instruction,
             task_state.status,
             task_state.attempts,
             task_state.last_action,
@@ -885,8 +872,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
             You will be given a task to complete.
             You will need to analyze the current state of the task and plan a sequence of actions to complete the task.
             The current timestamp is: {}
+            The current operating system is: {}
         ",
-            Local::now().format("%Y%m%d_%H%M%S").to_string()
+            Local::now().format("%Y%m%d_%H%M%S"),
+            env::consts::OS
         );
 
         struct HistoryMessage {
@@ -913,40 +902,52 @@ async fn main() -> Result<(), Box<dyn Error>> {
         ));
 
         history_messages.iter().for_each(|message| {
-            let pair_frame = (
+            let frame = (
                 message.state_message.clone(),
                 message.screens_message.clone(),
+                message.analysis_message.clone(),
             );
 
-            let pairs = vec![pair_frame];
+            let frames = vec![frame];
 
-            let messages = pairs.into_iter().map(|(state_message, screens_message)| {
-                // let mut message = ChatCompletionRequestMessageContentPartText::default();
-                // message.text = state_message.to_string();
+            let messages =
+                frames
+                    .into_iter()
+                    .map(|(state_message, screens_message, analysis_message)| {
+                        // let mut message = ChatCompletionRequestMessageContentPartText::default();
+                        // message.text = state_message.to_string();
 
-                let images = screens_message.into_iter().map(|screen_message| {
-                    ChatCompletionRequestUserMessageContentPart::ImageUrl(
-                        ChatCompletionRequestMessageContentPartImageArgs::default()
-                            .image_url(screen_message)
-                            .build()
-                            .unwrap(),
-                    )
-                });
+                        let images = screens_message.into_iter().map(|screen_message| {
+                            ChatCompletionRequestUserMessageContentPart::ImageUrl(
+                                ChatCompletionRequestMessageContentPartImageArgs::default()
+                                    .image_url(screen_message)
+                                    .build()
+                                    .unwrap(),
+                            )
+                        });
 
-                let state = ChatCompletionRequestUserMessageContentPart::Text(
-                    ChatCompletionRequestMessageContentPartTextArgs::default()
-                        .text(state_message)
-                        .build()
-                        .unwrap(),
-                );
+                        let state = ChatCompletionRequestUserMessageContentPart::Text(
+                            ChatCompletionRequestMessageContentPartTextArgs::default()
+                                .text(state_message)
+                                .build()
+                                .unwrap(),
+                        );
 
-                let mut message_batch = vec![];
+                        let analysis = ChatCompletionRequestUserMessageContentPart::Text(
+                            ChatCompletionRequestMessageContentPartTextArgs::default()
+                                .text(analysis_message)
+                                .build()
+                                .unwrap(),
+                        );
 
-                message_batch.extend(images);
-                message_batch.push(state);
+                        let mut message_batch = vec![];
 
-                message_batch
-            });
+                        message_batch.extend(images);
+                        message_batch.push(state);
+                        message_batch.push(analysis);
+
+                        message_batch
+                    });
 
             complete_chat_messages.push(ChatCompletionRequestMessage::User(
                 ChatCompletionRequestUserMessageArgs::default()
@@ -993,10 +994,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .unwrap(),
                 );
 
+                // let analysis = ChatCompletionRequestUserMessageContentPart::Text(
+                //     ChatCompletionRequestMessageContentPartTextArgs::default()
+                //         .text(analysis_message)
+                //         .build()
+                //         .unwrap(),
+                // );
+
                 let mut message_batch = vec![];
 
                 message_batch.extend(images);
                 message_batch.push(state);
+                // message_batch.push(analysis);
 
                 message_batch
             });
@@ -1143,12 +1152,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         };
 
-        let analysis_message = serde_json::to_string_pretty(&parsed_analysis)
+        let current_analysis_message = serde_json::to_string_pretty(&parsed_analysis)
             .unwrap_or_else(|_| clean_analysis.to_string());
 
         complete_chat_messages.push(ChatCompletionRequestMessage::Assistant(
             ChatCompletionRequestAssistantMessageArgs::default()
-                .content(format!("STATE ANALYSIS: {}", analysis_message))
+                .content(format!("ANALYSIS: {}", current_analysis_message))
                 .build()
                 .unwrap(),
         ));
@@ -1157,6 +1166,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             ChatCompletionRequestUserMessageArgs::default()
                 .content(format!("
                 Based on this context analysis and the instruction '{}', plan a sequence of actions. Your response must be a STRICT JSON array of actions.
+                Remember use correct key combinations for the current operating system.
                 Available Actions (use ONLY these exact formats):
                 1. Window Focus:
                    {{ \"action\": \"window_focus\", \"title\": string, \"class\": string, \"method\": \"alt_tab\" | \"super_tab\" }}
@@ -1171,7 +1181,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                    {{ \"action\": \"key_press\", \"key\": \"return\" | \"tab\" | \"escape\" }}
                 
                 5. Key Combination:
-                   {{ \"action\": \"key_combination\", \"keys\": [\"control\" | \"alt\" | \"shift\" | \"meta\", string] }}
+                   {{ \"action\": \"key_combination\", \"keys\": [\"control\" | \"alt\" | \"shift\" | \"meta\" | \"cmd\", string] }}
                 
                 6. Text Input:
                    {{ \"action\": \"text_input\", \"text\": string }}
@@ -1218,6 +1228,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let action_response = client.chat().create(action_request).await.unwrap();
         let mut action_json = String::new();
+
         for choice in action_response.choices {
             action_json = choice.message.content.unwrap_or_default();
             println!("Action Plan: {}", action_json);
@@ -1309,7 +1320,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         result
                     }
                     Some("mouse_move") => {
-                        let mut result;
+                        let result;
                         if let (Some(x), Some(y)) = (action["x"].as_i64(), action["y"].as_i64()) {
                             println!("Moving mouse to ({}, {})", x, y);
                             let mut mouse = CustomMouse::new(&mut enigo);
@@ -1336,7 +1347,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         result
                     }
                     Some("mouse_click") => {
-                        let mut result;
+                        let result;
                         if let Some(button) = action["button"].as_str() {
                             println!("Clicking {} mouse button", button);
                             let mut mouse = CustomMouse::new(&mut enigo);
@@ -1362,7 +1373,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         result
                     }
                     Some("key_press") => {
-                        let mut result;
+                        let result;
                         if let Some(key) = action["key"].as_str() {
                             println!("Pressing key: {}", key);
 
@@ -1390,14 +1401,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         result
                     }
                     Some("key_combination") => {
-                        let mut result;
+                        let result;
                         if let Some(keys) = action["keys"].as_array() {
                             let key_names: Vec<String> = keys
                                 .iter()
                                 .filter_map(|k| k.as_str())
                                 .map(|s| s.to_lowercase())
                                 .collect();
-                            println!("Pressing key combination: {:?}", key_names);
+                            println!("Pressing key combination_: {:?}", key_names);
 
                             // Use our custom keyboard module
                             let mut keyboard = CustomKeyboard::new(&mut enigo);
@@ -1424,7 +1435,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         result
                     }
                     Some("text_input") => {
-                        let mut result;
+                        let result;
+
                         if let Some(text) = action["text"].as_str() {
                             println!("Typing text: {}", text);
 
