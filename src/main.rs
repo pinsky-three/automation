@@ -1070,7 +1070,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .build()
             .unwrap();
 
-        let analysis_response = client.chat().create(analysis_request).await.unwrap();
+        let analysis_response = client
+            .chat()
+            .create(analysis_request)
+            .await
+            .map_err(|err| {
+                println!("Error: Failed to create chat completion");
+                println!("Error: {}", err);
+
+                err
+            })
+            .unwrap();
+
         let mut analysis_json = String::new();
         for choice in analysis_response.choices {
             analysis_json = choice.message.content.unwrap_or_default();
